@@ -27,6 +27,7 @@ cargo check -p windows-orphan-cleaner
 - Links a directory to an installed app only by exact normalized product name, registered install path, or MSIX package family name. Everything else remains **unknown**.
 - Saves each completed four-root scan in a local SQLite database under the Tauri app-local-data directory. The most recent scan loads automatically on launch; **Refresh scan** is optional. A canceled or incomplete scan leaves the previous saved scan intact. Up to ten complete snapshots are retained for later history work.
 - Excludes its own app-local-data directory from scans, so the saved database does not inflate results.
+- On later scans, reuses an exact saved path-to-app relationship if the application has disappeared from a complete current inventory. Strong previous relationships are shown as **probable leftovers**; name-only relationships remain **possible leftovers**. Neither implies deletion safety.
 - Cannot delete, quarantine, or modify discovered resources.
 
 ## Planned next work

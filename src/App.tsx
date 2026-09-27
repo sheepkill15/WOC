@@ -29,6 +29,13 @@ function shortPath(path: string): string {
   return parts.slice(-2).join("\\");
 }
 
+function assessment(result: DirectoryResult): { label: string; className: string } {
+  if (result.orphanStatus === "probable_orphan") return { label: "Probable leftover", className: "former" };
+  if (result.orphanStatus === "possibly_orphaned") return { label: "Possible leftover", className: "former" };
+  if (result.orphanStatus === "not_orphaned") return { label: "Installed match", className: "matched" };
+  return { label: "Unknown", className: "unknown" };
+}
+
 export default function App() {
   const [apps, setApps] = useState<Application[]>([]);
   const [inventoryWarnings, setInventoryWarnings] = useState<string[]>([]);
@@ -39,7 +46,7 @@ export default function App() {
   const [summary, setSummary] = useState<ScanSummary | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState<"all" | "matched" | "unknown">("all");
+  const [filter, setFilter] = useState<"all" | "matched" | "former" | "unknown">("all");
   const [query, setQuery] = useState("");
 
   useEffect(() => {
@@ -95,14 +102,17 @@ export default function App() {
   }, []);
 
   const visible = useMemo(() => results.filter(result => {
-    if (filter === "matched" && !result.owner) return false;
-    if (filter === "unknown" && result.owner) return false;
+    if (filter === "matched" && result.orphanStatus !== "not_orphaned") return false;
+    if (filter === "former" && !["probable_orphan", "possibly_orphaned"].includes(result.orphanStatus)) return false;
+    if (filter === "unknown" && result.orphanStatus !== "unknown") return false;
     const text = `${result.path} ${result.owner?.name ?? ""}`.toLowerCase();
     return text.includes(query.toLowerCase());
   }).sort((a, b) => b.sizeBytes - a.sizeBytes), [results, filter, query]);
   const selected = results.find(result => result.path === selectedPath);
   const total = results.reduce((sum, result) => sum + result.sizeBytes, 0);
-  const matched = results.filter(result => result.owner).length;
+  const matched = results.filter(result => result.orphanStatus === "not_orphaned").length;
+  const former = results.filter(result => ["probable_orphan", "possibly_orphaned"].includes(result.orphanStatus)).length;
+  const unknown = results.filter(result => result.orphanStatus === "unknown").length;
 
   async function start() {
     setError(""); setResults([]); setSelectedPath(null); setSummary(null); setSavedAt(null); setCurrentPath(""); setRunning(true);
@@ -145,9 +155,9 @@ export default function App() {
       {summary?.warnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
       {summary && <div className="scan-coverage" title={summary.scannedRoots.join("\n")}>Scanned roots: {summary.scannedRoots.map(root => root.split(": ")[0]).join(", ") || "none"}{summary.canceled ? " (partial scan)" : ""}</div>}
       <div className="section-heading"><div><h2>Application data</h2><p>Unmatched means ownership is unknown. It does not mean safe to remove.</p></div></div>
-      <div className="toolbar"><div className="tabs"><button className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>All <span>{results.length}</span></button><button className={filter === "matched" ? "selected" : ""} onClick={() => setFilter("matched")}>Matched <span>{matched}</span></button><button className={filter === "unknown" ? "selected" : ""} onClick={() => setFilter("unknown")}>Unknown <span>{results.length - matched}</span></button></div><input aria-label="Search directories" placeholder="Search directories or applications" value={query} onChange={event => setQuery(event.target.value)} /></div>
-      <div className="content-grid"><div className="table-wrap"><table><thead><tr><th>Directory</th><th>Size</th><th>Probable owner</th></tr></thead><tbody>{visible.map(result => <tr key={result.path} className={selectedPath === result.path ? "selected-row" : ""} onClick={() => setSelectedPath(result.path)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPath(result.path); } }} tabIndex={0} aria-selected={selectedPath === result.path}><td><strong>{shortPath(result.path)}</strong><small title={result.path}>{result.path}</small></td><td>{formatBytes(result.sizeBytes)}</td><td><span className="owner-name">{result.owner?.name ?? "Unresolved"}</span><span className={`badge ${result.owner ? "matched" : "unknown"}`}>{result.owner ? "Installed match" : "Unknown"}</span></td></tr>)}</tbody></table>{visible.length === 0 && <div className="empty">{results.length === 0 ? "Start a scan to inspect application data directories." : "No directories match these filters."}</div>}</div>
-      <aside className="details">{selected ? <><div className="details-head"><span>DIRECTORY DETAILS</span><h3>{shortPath(selected.path)}</h3><p>{selected.path}</p></div><div className="detail-grid"><div><span>Size</span><strong>{formatBytes(selected.sizeBytes)}</strong></div><div><span>Files</span><strong>{selected.fileCount.toLocaleString()}</strong></div><div><span>Subfolders</span><strong>{selected.directoryCount.toLocaleString()}</strong></div><div><span>Source</span><strong>{selected.root}</strong></div></div><h4>Ownership assessment</h4><p>{selected.owner ? `Likely associated with installed application ${selected.owner.name}.` : "No reliable owner identified. This directory is not classified as an orphan."}</p><h4>Evidence</h4>{selected.evidence.length ? selected.evidence.map((item, index) => <div className="evidence" key={index}><span>{item.strength}</span><p>{item.description}</p></div>) : <p className="muted">No ownership evidence yet.</p>}{selected.skippedEntries > 0 && <p className="detail-warning">{selected.skippedEntries} entries were skipped; the displayed size may be incomplete.</p>}<div className="detail-foot">Read only · No cleanup actions available</div></> : <div className="detail-empty"><div>◎</div><h3>Select a directory</h3><p>Review the evidence behind each ownership assessment.</p></div>}</aside></div>
+      <div className="toolbar"><div className="tabs"><button className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>All <span>{results.length}</span></button><button className={filter === "matched" ? "selected" : ""} onClick={() => setFilter("matched")}>Installed <span>{matched}</span></button><button className={filter === "former" ? "selected" : ""} onClick={() => setFilter("former")}>Former app data <span>{former}</span></button><button className={filter === "unknown" ? "selected" : ""} onClick={() => setFilter("unknown")}>Unknown <span>{unknown}</span></button></div><input aria-label="Search directories" placeholder="Search directories or applications" value={query} onChange={event => setQuery(event.target.value)} /></div>
+      <div className="content-grid"><div className="table-wrap"><table><thead><tr><th>Directory</th><th>Size</th><th>Probable owner</th></tr></thead><tbody>{visible.map(result => <tr key={result.path} className={selectedPath === result.path ? "selected-row" : ""} onClick={() => setSelectedPath(result.path)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPath(result.path); } }} tabIndex={0} aria-selected={selectedPath === result.path}><td><strong>{shortPath(result.path)}</strong><small title={result.path}>{result.path}</small></td><td>{formatBytes(result.sizeBytes)}</td><td><span className="owner-name">{result.owner?.name ?? "Unresolved"}</span><span className={`badge ${assessment(result).className}`}>{assessment(result).label}</span></td></tr>)}</tbody></table>{visible.length === 0 && <div className="empty">{results.length === 0 ? "Start a scan to inspect application data directories." : "No directories match these filters."}</div>}</div>
+      <aside className="details">{selected ? <><div className="details-head"><span>DIRECTORY DETAILS</span><h3>{shortPath(selected.path)}</h3><p>{selected.path}</p></div><div className="detail-grid"><div><span>Size</span><strong>{formatBytes(selected.sizeBytes)}</strong></div><div><span>Files</span><strong>{selected.fileCount.toLocaleString()}</strong></div><div><span>Subfolders</span><strong>{selected.directoryCount.toLocaleString()}</strong></div><div><span>Source</span><strong>{selected.root}</strong></div></div><h4>Ownership assessment</h4><p>{["probable_orphan", "possibly_orphaned"].includes(selected.orphanStatus) ? `Previously associated with ${selected.owner?.name}. That app is absent from the current inventory. This may still contain valuable data.` : selected.owner ? `Associated with installed application ${selected.owner.name}.` : "No reliable owner identified. This directory is not classified as an orphan."}</p><h4>Evidence</h4>{selected.evidence.length ? selected.evidence.map((item, index) => <div className="evidence" key={index}><span>{item.strength}</span><p>{item.description}</p></div>) : <p className="muted">No ownership evidence yet.</p>}{selected.skippedEntries > 0 && <p className="detail-warning">{selected.skippedEntries} entries were skipped; the displayed size may be incomplete.</p>}<div className="detail-foot">Read only · No cleanup actions available</div></> : <div className="detail-empty"><div>◎</div><h3>Select a directory</h3><p>Review the evidence behind each ownership assessment.</p></div>}</aside></div>
     </main>
   </div>;
 }

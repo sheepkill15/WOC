@@ -81,20 +81,27 @@ pub fn normalize_name(value: &str) -> String {
     value.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-fn registry_applications() -> Vec<Application> {
+fn registry_applications() -> (Vec<Application>, Vec<String>) {
     let mut found: HashMap<String, Application> = HashMap::new();
+    let mut warnings = Vec::new();
     for (hive, hive_name) in [
         (RegKey::predef(HKEY_CURRENT_USER), "HKCU"),
         (RegKey::predef(HKEY_LOCAL_MACHINE), "HKLM"),
     ] {
         for (view, flag) in [("64", KEY_WOW64_64KEY), ("32", KEY_WOW64_32KEY)] {
-            let Ok(uninstall) = hive.open_subkey_with_flags(
+            let uninstall = hive.open_subkey_with_flags(
                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
                 KEY_READ | flag,
-            ) else {
+            );
+            let Ok(uninstall) = uninstall else {
+                warnings.push(format!("Could not read {hive_name} {view}-bit uninstall entries."));
                 continue;
             };
-            for subkey in uninstall.enum_keys().flatten() {
+            for subkey in uninstall.enum_keys() {
+                let Ok(subkey) = subkey else {
+                    warnings.push(format!("Could not enumerate every {hive_name} {view}-bit uninstall entry."));
+                    continue;
+                };
                 let Ok(entry) = uninstall.open_subkey_with_flags(&subkey, KEY_READ) else {
                     continue;
                 };
@@ -125,7 +132,7 @@ fn registry_applications() -> Vec<Application> {
     }
     let mut apps: Vec<_> = found.into_values().collect();
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    apps
+    (apps, warnings)
 }
 
 fn msix_applications() -> Result<Vec<Application>, String> {
@@ -152,8 +159,7 @@ fn msix_applications() -> Result<Vec<Application>, String> {
 }
 
 pub fn installed_applications() -> Inventory {
-    let mut applications = registry_applications();
-    let mut warnings = Vec::new();
+    let (mut applications, mut warnings) = registry_applications();
     match msix_applications() {
         Ok(mut packages) => applications.append(&mut packages),
         Err(warning) => warnings.push(warning),
@@ -305,6 +311,48 @@ fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, Str
     (Some(app.clone()), ownership.into(), "not_orphaned".into(), evidence)
 }
 
+fn same_application(left: &Application, right: &Application) -> bool {
+    left.id.eq_ignore_ascii_case(&right.id)
+        || left.package_family_name.as_deref().zip(right.package_family_name.as_deref())
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        || left.install_location.as_deref().zip(right.install_location.as_deref())
+            .is_some_and(|(a, b)| !a.is_empty() && a.eq_ignore_ascii_case(b))
+        || normalize_name(&left.name) == normalize_name(&right.name)
+}
+
+/// Carries forward a previously observed owner only when the same resource remains
+/// and the current app inventory has no matching installation. It makes no safety claim.
+pub fn apply_history(result: &mut DirectoryResult, current: &Inventory, previous: &Inventory, previous_result: Option<&DirectoryResult>) {
+    if result.owner.is_some() || !current.warnings.is_empty() || !previous.warnings.is_empty() {
+        return;
+    }
+    let Some(previous_result) = previous_result else { return; };
+    let Some(previous_owner) = previous_result.owner.as_ref() else { return; };
+    if !previous_result.path.eq_ignore_ascii_case(&result.path) { return; }
+    if current.applications.iter().any(|app| same_application(app, previous_owner)) { return; }
+    let previously_observed = match previous_result.orphan_status.as_str() {
+        "not_orphaned" => previous.applications.iter().any(|app| same_application(app, previous_owner)),
+        "probable_orphan" | "possibly_orphaned" => true,
+        _ => false,
+    };
+    if !previously_observed { return; }
+    let strong_history = previous_result.ownership == "confirmed"
+        || previous_result.ownership == "historical_confirmed";
+    result.owner = Some(previous_owner.clone());
+    result.ownership = if strong_history { "historical_confirmed" } else { "historical_likely" }.into();
+    result.orphan_status = if strong_history { "probable_orphan" } else { "possibly_orphaned" }.into();
+    result.evidence.push(Evidence {
+        kind: "historical_owner".into(),
+        description: format!("A previous completed scan linked this exact directory to {}.", previous_owner.name),
+        strength: if strong_history { "strong" } else { "medium" }.into(),
+    });
+    result.evidence.push(Evidence {
+        kind: "missing_installed_app".into(),
+        description: format!("{} is absent from the current uninstall and current-user package inventory. Portable or unregistered installations may still exist.", previous_owner.name),
+        strength: "weak".into(),
+    });
+}
+
 fn scan_target(path: PathBuf, root: &str, apps: &[Application], cancel: &AtomicBool, summary: &mut ScanSummary, on_result: &mut impl FnMut(DirectoryResult), on_progress: &mut impl FnMut(String)) {
     if cancel.load(Ordering::Relaxed) { return; }
     on_progress(path.to_string_lossy().into_owned());
@@ -411,5 +459,53 @@ mod tests {
     fn app_data_exclusion_ignores_windows_path_case() {
         let excluded = vec![PathBuf::from(r"C:\Users\Test\AppData\Local\dev.orphancleaner.desktop")];
         assert!(is_excluded(Path::new(r"c:\users\test\appdata\local\DEV.ORPHANCLEANER.DESKTOP"), &excluded));
+    }
+
+    fn example_app(id: &str) -> Application {
+        Application { id: id.into(), name: "Example".into(), publisher: None, version: None,
+            install_location: None, package_family_name: None, sources: vec!["registry".into()] }
+    }
+
+    fn example_result(owner: Option<Application>, ownership: &str, status: &str) -> DirectoryResult {
+        DirectoryResult { path: r"C:\Users\Test\AppData\Roaming\Example".into(), root: "Roaming".into(),
+            size_bytes: 100, file_count: 1, directory_count: 0, newest_modified_unix: None,
+            skipped_entries: 0, owner, ownership: ownership.into(), orphan_status: status.into(), evidence: vec![] }
+    }
+
+    #[test]
+    fn strong_previous_relationship_becomes_probable_leftover() {
+        let app = example_app("old-registry-key");
+        let previous = Inventory { applications: vec![app.clone()], warnings: vec![] };
+        let current = Inventory { applications: vec![], warnings: vec![] };
+        let before = example_result(Some(app), "confirmed", "not_orphaned");
+        let mut now = example_result(None, "unknown", "unknown");
+        apply_history(&mut now, &current, &previous, Some(&before));
+        assert_eq!(now.orphan_status, "probable_orphan");
+        assert_eq!(now.evidence.len(), 2);
+    }
+
+    #[test]
+    fn name_only_history_remains_tentative_and_incomplete_inventory_is_ignored() {
+        let app = example_app("old-registry-key");
+        let previous = Inventory { applications: vec![app.clone()], warnings: vec![] };
+        let before = example_result(Some(app), "likely", "not_orphaned");
+        let mut now = example_result(None, "unknown", "unknown");
+        let incomplete = Inventory { applications: vec![], warnings: vec!["MSIX unavailable".into()] };
+        apply_history(&mut now, &incomplete, &previous, Some(&before));
+        assert_eq!(now.orphan_status, "unknown");
+        let complete = Inventory { applications: vec![], warnings: vec![] };
+        apply_history(&mut now, &complete, &previous, Some(&before));
+        assert_eq!(now.orphan_status, "possibly_orphaned");
+    }
+
+    #[test]
+    fn updated_registration_prevents_false_removal() {
+        let app = example_app("old-registry-key");
+        let previous = Inventory { applications: vec![app.clone()], warnings: vec![] };
+        let current = Inventory { applications: vec![example_app("new-registry-key")], warnings: vec![] };
+        let before = example_result(Some(app), "confirmed", "not_orphaned");
+        let mut now = example_result(None, "unknown", "unknown");
+        apply_history(&mut now, &current, &previous, Some(&before));
+        assert_eq!(now.orphan_status, "unknown");
     }
 }
