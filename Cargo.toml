@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/cleaner-core", "src-tauri"]
+resolver = "2"
+

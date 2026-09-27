@@ -1,0 +1,32 @@
+# Windows Orphan Cleaner
+
+Early read-only Windows desktop prototype for the [product specification](./Windows%20Orphan%20Cleaner%20%E2%80%94%20Product%20and%20Technical%20Specification.md).
+
+## Run
+
+Requirements: Windows 10/11, Rust, Node.js, npm, and WebView2.
+
+```powershell
+npm install
+npm run tauri dev
+```
+
+Run checks:
+
+```powershell
+npm run build
+cargo test -p cleaner-core
+cargo check -p windows-orphan-cleaner
+```
+
+## Current behavior
+
+- Reads per-user and machine uninstall registry entries in 32-bit and 64-bit views.
+- Scans immediate application directories under Local, Roaming, LocalLow, and ProgramData; recursively measures each directory without reading file contents.
+- Skips reparse points, reports inaccessible entries, supports cancellation, and streams results to the UI.
+- Links a directory to an installed app only by exact normalized product name or registered install path. Everything else remains **unknown**.
+- Cannot delete, quarantine, or modify discovered resources.
+
+## Planned next work
+
+Add MSIX/AppX inventory, richer active-application evidence, nested vendor-directory discovery, historical observations, and an audited validation corpus before making orphan claims. Cleanup remains out of scope until ownership and classification are reliable.
