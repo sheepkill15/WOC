@@ -7,7 +7,7 @@ fn main() {
     for warning in &inventory.warnings { println!("Inventory warning: {warning}"); }
     let cancel = AtomicBool::new(false);
     let mut seen = 0;
-    let summary = scan(&inventory.applications, &cancel, |result| {
+    let summary = scan(&inventory.applications, &[], &cancel, |result| {
         println!("{} | {} bytes | {} | {} skipped", result.path, result.size_bytes,
             result.owner.as_ref().map(|app| app.name.as_str()).unwrap_or("unknown"), result.skipped_entries);
         seen += 1;

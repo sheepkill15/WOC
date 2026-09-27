@@ -25,6 +25,8 @@ cargo check -p windows-orphan-cleaner
 - Finds Local, Roaming, LocalLow, and ProgramData through Windows Known Folder APIs, with a reported environment fallback when needed. It inspects children of Local `Packages` and `Programs` separately, recursively measuring each target without reading file contents.
 - Skips reparse points, reports inaccessible entries, supports cancellation, and streams results to the UI.
 - Links a directory to an installed app only by exact normalized product name, registered install path, or MSIX package family name. Everything else remains **unknown**.
+- Saves each completed four-root scan in a local SQLite database under the Tauri app-local-data directory. The most recent scan loads automatically on launch; **Refresh scan** is optional. A canceled or incomplete scan leaves the previous saved scan intact. Up to ten complete snapshots are retained for later history work.
+- Excludes its own app-local-data directory from scans, so the saved database does not inflate results.
 - Cannot delete, quarantine, or modify discovered resources.
 
 ## Planned next work

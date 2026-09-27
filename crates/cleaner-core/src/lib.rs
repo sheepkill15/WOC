@@ -13,7 +13,7 @@ use windows::core::GUID;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_ProgramData, FOLDERID_RoamingAppData};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Application {
     pub id: String,
@@ -25,7 +25,7 @@ pub struct Application {
     pub sources: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Inventory {
     pub applications: Vec<Application>,
@@ -42,7 +42,7 @@ struct AppxPackage {
     package_family_name: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Evidence {
     pub kind: String,
@@ -50,7 +50,7 @@ pub struct Evidence {
     pub strength: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryResult {
     pub path: String,
@@ -66,7 +66,7 @@ pub struct DirectoryResult {
     pub evidence: Vec<Evidence>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanSummary {
     pub directories: u64,
@@ -321,7 +321,11 @@ fn scan_target(path: PathBuf, root: &str, apps: &[Application], cancel: &AtomicB
     });
 }
 
-pub fn scan<F, P>(apps: &[Application], cancel: &AtomicBool, mut on_result: F, mut on_progress: P) -> ScanSummary
+fn is_excluded(path: &Path, excluded_paths: &[PathBuf]) -> bool {
+    excluded_paths.iter().any(|excluded| path.to_string_lossy().eq_ignore_ascii_case(&excluded.to_string_lossy()))
+}
+
+pub fn scan<F, P>(apps: &[Application], excluded_paths: &[PathBuf], cancel: &AtomicBool, mut on_result: F, mut on_progress: P) -> ScanSummary
 where
     F: FnMut(DirectoryResult),
     P: FnMut(String),
@@ -343,6 +347,7 @@ where
             let Ok(metadata) = fs::symlink_metadata(entry.path()) else { summary.skipped_entries += 1; continue; };
             if !metadata.is_dir() || is_reparse_point(&metadata) { continue; }
             let path = entry.path();
+            if is_excluded(&path, excluded_paths) { continue; }
             let structural_container = label == "Local" && ["Packages", "Programs"].iter().any(|name| entry.file_name().to_string_lossy().eq_ignore_ascii_case(name));
             if structural_container {
                 let Ok(children) = fs::read_dir(&path) else { summary.skipped_entries += 1; continue; };
@@ -350,6 +355,7 @@ where
                     if cancel.load(Ordering::Relaxed) { break; }
                     let Ok(child) = child else { summary.skipped_entries += 1; continue; };
                     let child_path = child.path();
+                    if is_excluded(&child_path, excluded_paths) { continue; }
                     let Ok(child_metadata) = fs::symlink_metadata(&child_path) else { summary.skipped_entries += 1; continue; };
                     if !child_metadata.is_dir() || is_reparse_point(&child_metadata) { continue; }
                     scan_target(child_path, &label, apps, cancel, &mut summary, &mut on_result, &mut on_progress);
@@ -399,5 +405,11 @@ mod tests {
         assert_eq!(ownership, "confirmed");
         assert_eq!(orphan, "not_orphaned");
         assert_eq!(evidence[0].kind, "package_family_match");
+    }
+
+    #[test]
+    fn app_data_exclusion_ignores_windows_path_case() {
+        let excluded = vec![PathBuf::from(r"C:\Users\Test\AppData\Local\dev.orphancleaner.desktop")];
+        assert!(is_excluded(Path::new(r"c:\users\test\appdata\local\DEV.ORPHANCLEANER.DESKTOP"), &excluded));
     }
 }

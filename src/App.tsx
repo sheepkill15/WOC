@@ -11,6 +11,8 @@ type DirectoryResult = {
   ownership: string; orphanStatus: string; evidence: Evidence[];
 };
 type ScanSummary = { directories: number; bytes: number; skippedEntries: number; canceled: boolean; scannedRoots: string[]; warnings: string[] };
+type SavedScan = { capturedAtUnix: number; inventory: Inventory; summary: ScanSummary; results: DirectoryResult[] };
+type ScanFinishedEvent = { summary: ScanSummary; savedAtUnix: number | null; saveError: string | null };
 const native = "__TAURI_INTERNALS__" in window;
 
 function formatBytes(bytes: number): string {
@@ -35,6 +37,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [currentPath, setCurrentPath] = useState("");
   const [summary, setSummary] = useState<ScanSummary | null>(null);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<"all" | "matched" | "unknown">("all");
   const [query, setQuery] = useState("");
@@ -43,6 +46,13 @@ export default function App() {
     if (!native) return;
     let mounted = true;
     const unlisteners: UnlistenFn[] = [];
+    function showSaved(scan: SavedScan) {
+      setApps(scan.inventory.applications);
+      setInventoryWarnings(scan.inventory.warnings);
+      setResults(scan.results);
+      setSummary(scan.summary);
+      setSavedAt(scan.capturedAtUnix);
+    }
     async function connect() {
       try {
         const register = (unlisten: UnlistenFn) => { if (mounted) unlisteners.push(unlisten); else unlisten(); };
@@ -52,14 +62,30 @@ export default function App() {
         register(await listen<{path: string}>("scan-progress", event => {
           if (mounted) setCurrentPath(event.payload.path);
         }));
-        register(await listen<ScanSummary>("scan-finished", event => {
-          if (mounted) { setSummary(event.payload); setRunning(false); setCurrentPath(""); }
+        register(await listen<ScanFinishedEvent>("scan-finished", event => {
+          if (!mounted) return;
+          setSummary(event.payload.summary);
+          setRunning(false);
+          setCurrentPath("");
+          if (event.payload.saveError) setError(event.payload.saveError);
+          if (event.payload.savedAtUnix !== null || event.payload.summary.canceled || event.payload.saveError) {
+            void invoke<SavedScan | null>("load_latest_scan")
+              .then(scan => { if (mounted && scan) showSaved(scan); })
+              .catch(cause => { if (mounted) setError(String(cause)); });
+          }
         }));
         register(await listen<Inventory>("scan-inventory", event => {
           if (mounted) { setApps(event.payload.applications); setInventoryWarnings(event.payload.warnings); }
         }));
-        const inventory = await invoke<Inventory>("installed_applications");
-        if (mounted) { setApps(inventory.applications); setInventoryWarnings(inventory.warnings); }
+        let saved: SavedScan | null = null;
+        try { saved = await invoke<SavedScan | null>("load_latest_scan"); }
+        catch (cause) { if (mounted) setError(`Saved scan could not be loaded: ${String(cause)}`); }
+        if (saved) {
+          if (mounted) showSaved(saved);
+        } else {
+          const inventory = await invoke<Inventory>("installed_applications");
+          if (mounted) { setApps(inventory.applications); setInventoryWarnings(inventory.warnings); }
+        }
       } catch (cause) {
         if (mounted) setError(String(cause));
       }
@@ -79,9 +105,15 @@ export default function App() {
   const matched = results.filter(result => result.owner).length;
 
   async function start() {
-    setError(""); setResults([]); setSelectedPath(null); setSummary(null); setCurrentPath(""); setRunning(true);
+    setError(""); setResults([]); setSelectedPath(null); setSummary(null); setSavedAt(null); setCurrentPath(""); setRunning(true);
     try { await invoke("start_scan"); }
-    catch (cause) { setError(String(cause)); setRunning(false); }
+    catch (cause) {
+      setError(String(cause)); setRunning(false);
+      try {
+        const saved = await invoke<SavedScan | null>("load_latest_scan");
+        if (saved) { setApps(saved.inventory.applications); setResults(saved.results); setSummary(saved.summary); setSavedAt(saved.capturedAtUnix); }
+      } catch { /* The original start error remains visible. */ }
+    }
   }
 
   async function cancel() {
@@ -97,8 +129,9 @@ export default function App() {
       <div className="sidebar-bottom"><span className="read-only-dot" /> Read-only preview <small>No files can be deleted in this version.</small></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div><div className="eyebrow">LOCAL ANALYSIS · WINDOWS 10/11</div><h1>Directory inventory</h1><p>See which application data can be linked to installed software.</p></div><div className="top-actions">{running ? <button className="secondary" onClick={cancel}>Cancel scan</button> : <button className="primary" onClick={() => void start()} disabled={!native}>Start scan</button>}</div></header>
+      <header className="topbar"><div><div className="eyebrow">LOCAL ANALYSIS · WINDOWS 10/11</div><h1>Directory inventory</h1><p>See which application data can be linked to installed software.</p></div><div className="top-actions">{running ? <button className="secondary" onClick={cancel}>Cancel scan</button> : <button className="primary" onClick={() => void start()} disabled={!native}>{savedAt ? "Refresh scan" : "Start scan"}</button>}</div></header>
       {!native && <div className="notice">Open this project with Tauri to scan this Windows installation. The web preview cannot access your application data.</div>}
+      {savedAt && !running && <div className="notice">Saved scan from {new Date(savedAt * 1000).toLocaleString()}. Results may have changed since then; refresh when you want current data.</div>}
       {error && <div className="notice error">{error}</div>}
       {inventoryWarnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
       <section className="stats">
