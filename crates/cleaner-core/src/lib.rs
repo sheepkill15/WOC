@@ -13,6 +13,8 @@ use windows::core::GUID;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_ProgramData, FOLDERID_RoamingAppData};
 
+mod known_locations;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Application {
@@ -21,6 +23,8 @@ pub struct Application {
     pub publisher: Option<String>,
     pub version: Option<String>,
     pub install_location: Option<String>,
+    #[serde(default)]
+    pub display_icon_executable: Option<String>,
     pub package_family_name: Option<String>,
     pub sources: Vec<String>,
 }
@@ -61,6 +65,8 @@ pub struct DirectoryResult {
     pub newest_modified_unix: Option<u64>,
     pub skipped_entries: u64,
     pub owner: Option<Application>,
+    #[serde(default)]
+    pub owner_hint: Option<String>,
     pub ownership: String,
     pub orphan_status: String,
     pub evidence: Vec<Evidence>,
@@ -79,6 +85,56 @@ pub struct ScanSummary {
 
 pub fn normalize_name(value: &str) -> String {
     value.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+fn product_name_without_version(name: &str) -> String {
+    let name = name.trim();
+    let name = [" (User)", " (x64)", " (x86)"].iter()
+        .find_map(|suffix| name.strip_suffix(suffix)).unwrap_or(name);
+    let mut words = name.split_whitespace();
+    let mut product = Vec::new();
+    if let Some(first) = words.next() { product.push(first); }
+    product.extend(words.take_while(|word| {
+        let year = word.len() == 4 && word.starts_with("20") && word.chars().all(|ch| ch.is_ascii_digit());
+        let version = word.starts_with(|ch: char| ch.is_ascii_digit()) && word.contains('.');
+        !year && !version
+    }));
+    product.join(" ")
+}
+
+fn vendor_name(publisher: &str) -> String {
+    let mut words: Vec<&str> = publisher.split_whitespace().collect();
+    while words.last().is_some_and(|word| matches!(word.trim_end_matches([',', '.']).to_ascii_lowercase().as_str(),
+        "ab" | "inc" | "llc" | "ltd" | "limited" | "corporation" | "corp" | "gmbh" | "s.r.o")) {
+        words.pop();
+    }
+    normalize_name(&words.join(" "))
+}
+
+fn install_path_has_component(location: &str, name: &str) -> bool {
+    if matches!(name, "app" | "application" | "bin" | "cache" | "common" | "packages" | "programs" | "temp") {
+        return false;
+    }
+    location.split(['\\', '/']).any(|part| normalize_name(part) == name)
+}
+
+fn display_icon_executable(value: &str) -> Option<String> {
+    // DisplayIcon is commonly a quoted executable plus an optional icon index.
+    // Ignore DLLs, environment-variable paths and missing files: none proves an active app.
+    let trimmed = value.trim();
+    let path = if let Some(rest) = trimmed.strip_prefix('"') {
+        rest.split_once('"')?.0
+    } else {
+        match trimmed.rsplit_once(',') {
+            Some((path, index)) if index.trim().parse::<i32>().is_ok() => path.trim(),
+            _ => trimmed,
+        }
+    };
+    if path.contains('%') || !path.to_ascii_lowercase().ends_with(".exe")
+        || !Path::new(path).is_absolute() || !Path::new(path).is_file() {
+        return None;
+    }
+    Some(path.to_owned())
 }
 
 fn registry_applications() -> (Vec<Application>, Vec<String>) {
@@ -114,6 +170,8 @@ fn registry_applications() -> (Vec<Application>, Vec<String>) {
                 let publisher = entry.get_value::<String, _>("Publisher").ok().filter(|s| !s.trim().is_empty());
                 let version = entry.get_value::<String, _>("DisplayVersion").ok().filter(|s| !s.trim().is_empty());
                 let install_location = entry.get_value::<String, _>("InstallLocation").ok().filter(|s| !s.trim().is_empty());
+                let display_icon_executable = entry.get_value::<String, _>("DisplayIcon").ok()
+                    .and_then(|icon| display_icon_executable(&icon));
                 let source = format!("{hive_name} {view}-bit uninstall registry");
                 let id = format!("{hive_name}:{view}:{subkey}");
                 let key = format!("{}|{}|{}", normalize_name(&name), publisher.as_deref().map(normalize_name).unwrap_or_default(), version.as_deref().unwrap_or_default());
@@ -124,8 +182,11 @@ fn registry_applications() -> (Vec<Application>, Vec<String>) {
                     if existing.install_location.is_none() {
                         existing.install_location = install_location;
                     }
+                    if existing.display_icon_executable.is_none() {
+                        existing.display_icon_executable = display_icon_executable;
+                    }
                 } else {
-                    found.insert(key, Application { id, name, publisher, version, install_location, package_family_name: None, sources: vec![source] });
+                    found.insert(key, Application { id, name, publisher, version, install_location, display_icon_executable, package_family_name: None, sources: vec![source] });
                 }
             }
         }
@@ -153,6 +214,7 @@ fn msix_applications() -> Result<Vec<Application>, String> {
         publisher: package.publisher_display_name,
         version: package.version,
         install_location: package.install_location.filter(|s| !s.is_empty()),
+        display_icon_executable: None,
         package_family_name: Some(package.package_family_name),
         sources: vec!["Current-user MSIX/AppX package".into()],
     }).collect())
@@ -280,35 +342,136 @@ fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, Str
     let is_package_data = path.parent().and_then(Path::file_name).is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Packages"));
     let mut strong = Vec::new();
     let mut names = Vec::new();
+    let mut vendors = Vec::new();
     for app in apps {
         let exact_name = normalize_name(&app.name) == normalized;
+        let product = product_name_without_version(&app.name);
+        let versioned_name = normalize_name(&product) == normalized;
+        let package_product = app.package_family_name.is_some()
+            && product.rsplit_once('.').is_some_and(|(_, tail)| normalize_name(tail) == normalized);
+        let desktop_folder = basename.to_ascii_lowercase().strip_suffix("-desktop")
+            .is_some_and(|base| normalize_name(base) == normalize_name(&product));
+        let known_alias = normalized == "tft"
+            && matches!(normalize_name(&product).as_str(), "teamfighttactics" | "teamfighttacticspbe");
+        let product_family = [" Desktop", " Studio"].iter()
+            .any(|suffix| product.strip_suffix(suffix).is_some_and(|base| normalize_name(base) == normalized));
         let exact_install = app.install_location.as_deref().is_some_and(|location| {
             Path::new(location).to_string_lossy().trim_end_matches(['\\', '/']).eq_ignore_ascii_case(&path_string)
         });
         let exact_package = is_package_data && app.package_family_name.as_deref().is_some_and(|family| family.eq_ignore_ascii_case(&basename));
-        if exact_install || exact_package {
-            strong.push((app, exact_install, exact_package));
-        } else if exact_name {
+        let icon_inside = app.display_icon_executable.as_deref()
+            .and_then(|icon| Path::new(icon).parent())
+            .is_some_and(|parent| parent.to_string_lossy().trim_end_matches(['\\', '/']).eq_ignore_ascii_case(&path_string));
+        if exact_install || exact_package || icon_inside {
+            strong.push((app, exact_install, exact_package, icon_inside));
+        } else if exact_name || versioned_name || package_product || desktop_folder || known_alias {
             names.push(app);
+        } else if product_family
+            || app.publisher.as_deref().is_some_and(|publisher| normalize_name(publisher) == normalized || vendor_name(publisher) == normalized)
+            || app.install_location.as_deref().is_some_and(|location| install_path_has_component(location, &normalized)) {
+            vendors.push(app);
         }
     }
     if strong.len() > 1 || (strong.is_empty() && names.len() > 1) {
-        let evidence = vec![Evidence { kind: "multiple_matches".into(), description: "Several installed applications match this directory; ownership is ambiguous.".into(), strength: "weak".into() }];
-        return (None, "unknown".into(), "unknown".into(), evidence);
+        let matching = if strong.is_empty() { names.iter().map(|app| app.name.as_str()).collect::<Vec<_>>() }
+            else { strong.iter().map(|(app, _, _, _)| app.name.as_str()).collect::<Vec<_>>() };
+        let evidence = vec![Evidence { kind: "multiple_matches".into(), description: format!("Several installed applications match this directory ({}); no single product owner can be assigned.", matching.join(", ")), strength: "medium".into() }];
+        return (None, "shared".into(), "associated_with_installed".into(), evidence);
     }
-    let (app, ownership, evidence) = if let Some((app, install, package)) = strong.first() {
+    let (app, ownership, evidence) = if let Some((app, install, package, icon)) = strong.first() {
         let (kind, description) = if *package {
             ("package_family_match", format!("Directory matches installed package family {}.", app.package_family_name.as_deref().unwrap_or_default()))
         } else if *install {
             ("install_path_match", format!("The installed application's registered path is this directory ({}).", app.sources.join(", ")))
+        } else if *icon {
+            ("registered_executable", format!("The installed application's registry entry points to an existing executable inside this directory ({}).", app.sources.join(", ")))
         } else { unreachable!() };
         (*app, "confirmed", vec![Evidence { kind: kind.into(), description, strength: "strong".into() }])
     } else if let Some(app) = names.first() {
-        (*app, "likely", vec![Evidence { kind: "directory_name_match".into(), description: format!("The directory name exactly matches installed application “{}”.", app.name), strength: "medium".into() }])
+        let description = if normalize_name(&app.name) == normalized {
+            format!("The directory name exactly matches installed application “{}”.", app.name)
+        } else {
+            format!("The directory name matches a product or package-name variant of installed application “{}”.", app.name)
+        };
+        (*app, "likely", vec![Evidence { kind: "directory_name_match".into(), description, strength: "medium".into() }])
     } else {
-        return (None, "unknown".into(), "unknown".into(), vec![]);
+        if vendors.is_empty() {
+            return (None, "unknown".into(), "unknown".into(), vec![]);
+        }
+        let examples = vendors.iter().take(3).map(|app| app.name.as_str()).collect::<Vec<_>>().join(", ");
+        return (None, "shared".into(), "associated_with_installed".into(), vec![Evidence {
+            kind: "vendor_or_install_segment".into(),
+            description: format!("This folder name matches an installed application's publisher or an installation-path component (for example: {examples}). It may also contain data from other or older products."),
+            strength: "weak".into(),
+        }]);
     };
     (Some(app.clone()), ownership.into(), "not_orphaned".into(), evidence)
+}
+
+fn nested_installed_owner(path: &Path, apps: &[Application]) -> Option<Application> {
+    let vendor = normalize_name(&path.file_name()?.to_string_lossy());
+    let candidates: Vec<_> = apps.iter().filter(|app| app.publisher.as_deref()
+        .is_some_and(|publisher| normalize_name(publisher) == vendor || vendor_name(publisher) == vendor)).collect();
+    if candidates.is_empty() { return None; }
+    let mut children = Vec::new();
+    for entry in fs::read_dir(path).ok()?.take(65) {
+        let entry = entry.ok()?;
+        let metadata = fs::symlink_metadata(entry.path()).ok()?;
+        if metadata.is_dir() && !is_reparse_point(&metadata) {
+            children.push(normalize_name(&entry.file_name().to_string_lossy()));
+        }
+    }
+    if children.len() != 1 { return None; }
+    let matches: Vec<_> = candidates.into_iter().filter(|app| {
+        normalize_name(&app.name) == children[0]
+            || normalize_name(&product_name_without_version(&app.name)) == children[0]
+    }).collect();
+    (matches.len() == 1).then(|| (*matches[0]).clone())
+}
+
+fn enrich_directory(result: &mut DirectoryResult, apps: &[Application]) {
+    if result.orphan_status == "associated_with_installed"
+        && Path::new(&result.path).file_name().is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("TFT"))
+        && apps.iter().any(|app| normalize_name(&app.name).starts_with("teamfighttactics")) {
+        result.owner_hint = Some("Teamfight Tactics".into());
+        result.evidence.push(Evidence {
+            kind: "known_product_alias".into(),
+            description: "TFT is the Teamfight Tactics data-folder name; installed editions may share this folder.".into(),
+            strength: "medium".into(),
+        });
+    }
+    if result.owner.is_none() && matches!(result.orphan_status.as_str(), "unknown" | "associated_with_installed") {
+        if let Some(app) = nested_installed_owner(Path::new(&result.path), apps) {
+            result.evidence.push(Evidence {
+                kind: "publisher_and_child_match".into(),
+                description: format!("The folder name matches publisher {} and its only immediate product folder matches installed application {}.", app.publisher.as_deref().unwrap_or_default(), app.name),
+                strength: "medium".into(),
+            });
+            result.owner = Some(app);
+            result.owner_hint = None;
+            result.ownership = "likely".into();
+            result.orphan_status = "not_orphaned".into();
+            return;
+        }
+    }
+    if result.orphan_status != "unknown" { return; }
+    let Some(name) = Path::new(&result.path).file_name() else { return; };
+    let Some(known) = known_locations::lookup(&result.root, &name.to_string_lossy()) else { return; };
+    result.owner_hint = Some(known.label.into());
+    result.ownership = "known_location".into();
+    result.orphan_status = if known.possible_former { "possibly_orphaned" } else { "known_application_data" }.into();
+    result.evidence.push(Evidence {
+        kind: "known_location".into(),
+        description: known.description.into(),
+        strength: if known.possible_former { "weak" } else { "medium" }.into(),
+    });
+    if known.possible_former {
+        result.evidence.push(Evidence {
+            kind: "missing_installed_app".into(),
+            description: "No matching uninstall or current-user package entry was found. A launcher-managed or portable installation may still exist.".into(),
+            strength: "weak".into(),
+        });
+    }
 }
 
 fn same_application(left: &Application, right: &Application) -> bool {
@@ -362,11 +525,13 @@ fn scan_target(path: PathBuf, root: &str, apps: &[Application], cancel: &AtomicB
     summary.directories += 1;
     summary.bytes = summary.bytes.saturating_add(size);
     summary.skipped_entries += skipped;
-    on_result(DirectoryResult {
+    let mut result = DirectoryResult {
         path: path.to_string_lossy().into_owned(), root: root.to_owned(), size_bytes: size,
         file_count: files, directory_count: directories, newest_modified_unix: newest,
-        skipped_entries: skipped, owner, ownership, orphan_status, evidence,
-    });
+        skipped_entries: skipped, owner, owner_hint: None, ownership, orphan_status, evidence,
+    };
+    enrich_directory(&mut result, apps);
+    on_result(result);
 }
 
 fn is_excluded(path: &Path, excluded_paths: &[PathBuf]) -> bool {
@@ -425,6 +590,18 @@ mod tests {
     fn exact_normalization_matches_punctuation_without_fuzzy_guessing() {
         assert_eq!(normalize_name("JetBrains.Rider"), "jetbrainsrider");
         assert_ne!(normalize_name("Rider2024"), normalize_name("Rider2025"));
+        assert_eq!(product_name_without_version("Signal 8.28.0"), "Signal");
+        assert_eq!(product_name_without_version("Microsoft 365"), "Microsoft 365");
+        assert_eq!(product_name_without_version("7-Zip 25.01"), "7-Zip");
+    }
+
+    #[test]
+    fn display_icon_accepts_only_an_existing_executable() {
+        let executable = std::env::current_exe().unwrap();
+        let executable = executable.to_string_lossy();
+        assert_eq!(display_icon_executable(&format!("\"{executable}\",0")), Some(executable.to_string()));
+        assert_eq!(display_icon_executable(r"C:\Missing\App.exe,0"), None);
+        assert_eq!(display_icon_executable(r"C:\Windows\System32\shell32.dll,0"), None);
     }
 
     #[test]
@@ -436,7 +613,7 @@ mod tests {
 
     #[test]
     fn active_exact_match_is_not_orphaned() {
-        let app = Application { id: "test".into(), name: "Notion".into(), publisher: None, version: None, install_location: None, package_family_name: None, sources: vec!["test".into()] };
+        let app = Application { id: "test".into(), name: "Notion".into(), publisher: None, version: None, install_location: None, display_icon_executable: None, package_family_name: None, sources: vec!["test".into()] };
         let (owner, ownership, orphan, evidence) = resolve_owner(Path::new(r"C:\Users\Test\AppData\Roaming\Notion"), &[app]);
         assert_eq!(owner.unwrap().name, "Notion");
         assert_eq!(ownership, "likely");
@@ -446,13 +623,169 @@ mod tests {
 
     #[test]
     fn package_family_beats_an_unrelated_name_match() {
-        let package = Application { id: "package".into(), name: "Calculator".into(), publisher: None, version: None, install_location: None, package_family_name: Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe".into()), sources: vec!["MSIX".into()] };
-        let unrelated = Application { id: "name".into(), name: "Microsoft.WindowsCalculator_8wekyb3d8bbwe".into(), publisher: None, version: None, install_location: None, package_family_name: None, sources: vec!["registry".into()] };
+        let package = Application { id: "package".into(), name: "Calculator".into(), publisher: None, version: None, install_location: None, display_icon_executable: None, package_family_name: Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe".into()), sources: vec!["MSIX".into()] };
+        let unrelated = Application { id: "name".into(), name: "Microsoft.WindowsCalculator_8wekyb3d8bbwe".into(), publisher: None, version: None, install_location: None, display_icon_executable: None, package_family_name: None, sources: vec!["registry".into()] };
         let (owner, ownership, orphan, evidence) = resolve_owner(Path::new(r"C:\Users\Test\AppData\Local\Packages\Microsoft.WindowsCalculator_8wekyb3d8bbwe"), &[package, unrelated]);
         assert_eq!(owner.unwrap().id, "package");
         assert_eq!(ownership, "confirmed");
         assert_eq!(orphan, "not_orphaned");
         assert_eq!(evidence[0].kind, "package_family_match");
+    }
+
+    #[test]
+    fn registered_executable_matches_only_its_own_directory() {
+        let mut app = example_app("registered-app");
+        app.name = "Different Product Name".into();
+        app.display_icon_executable = Some(r"C:\Users\Test\AppData\Local\Programs\Example\Example.exe".into());
+        let (owner, ownership, _, evidence) = resolve_owner(
+            Path::new(r"C:\Users\Test\AppData\Local\Programs\Example"), &[app.clone()]);
+        assert_eq!(owner.unwrap().id, app.id);
+        assert_eq!(ownership, "confirmed");
+        assert_eq!(evidence[0].kind, "registered_executable");
+        let (owner, _, _, _) = resolve_owner(
+            Path::new(r"C:\Users\Test\AppData\Local\Programs"), &[app]);
+        assert!(owner.is_none());
+    }
+
+    #[test]
+    fn multiple_registered_executables_remain_ambiguous() {
+        let mut first = example_app("first");
+        first.display_icon_executable = Some(r"C:\Apps\Shared\First.exe".into());
+        let mut second = example_app("second");
+        second.display_icon_executable = Some(r"C:\Apps\Shared\Second.exe".into());
+        let (owner, ownership, _, evidence) = resolve_owner(Path::new(r"C:\Apps\Shared"), &[first, second]);
+        assert!(owner.is_none());
+        assert_eq!(ownership, "shared");
+        assert_eq!(evidence[0].kind, "multiple_matches");
+    }
+
+    #[test]
+    fn versioned_uninstall_name_matches_product_data_folder() {
+        let mut app = example_app("signal");
+        app.name = "Signal 8.28.0".into();
+        let (owner, ownership, status, evidence) = resolve_owner(
+            Path::new(r"C:\Users\Test\AppData\Roaming\Signal"), &[app]);
+        assert_eq!(owner.unwrap().name, "Signal 8.28.0");
+        assert_eq!(ownership, "likely");
+        assert_eq!(status, "not_orphaned");
+        assert_eq!(evidence[0].kind, "directory_name_match");
+    }
+
+    #[test]
+    fn vendor_directory_is_associated_without_single_owner() {
+        let mut driver = example_app("driver");
+        driver.name = "NVIDIA Graphics Driver 617.14".into();
+        driver.publisher = Some("NVIDIA Corporation".into());
+        let mut app = example_app("nvidia-app");
+        app.name = "NVIDIA App 11.0.9.251".into();
+        app.publisher = Some("NVIDIA Corporation".into());
+        let (owner, ownership, status, evidence) = resolve_owner(
+            Path::new(r"C:\ProgramData\NVIDIA Corporation"), &[driver, app]);
+        assert!(owner.is_none());
+        assert_eq!(ownership, "shared");
+        assert_eq!(status, "associated_with_installed");
+        assert_eq!(evidence[0].kind, "vendor_or_install_segment");
+    }
+
+    #[test]
+    fn install_path_component_associates_brave_vendor_data() {
+        let mut app = example_app("brave");
+        app.name = "Brave".into();
+        app.install_location = Some(r"C:\Program Files\BraveSoftware\Brave-Browser\Application".into());
+        let (owner, ownership, status, _) = resolve_owner(
+            Path::new(r"C:\Users\Test\AppData\Local\BraveSoftware"), &[app]);
+        assert!(owner.is_none());
+        assert_eq!(ownership, "shared");
+        assert_eq!(status, "associated_with_installed");
+    }
+
+    #[test]
+    fn studio_family_is_associated_without_claiming_exclusive_owner() {
+        let mut app = example_app("android-studio");
+        app.name = "Android Studio".into();
+        let (owner, ownership, status, _) = resolve_owner(
+            Path::new(r"C:\Users\Test\AppData\Local\Android"), &[app]);
+        assert!(owner.is_none());
+        assert_eq!(ownership, "shared");
+        assert_eq!(status, "associated_with_installed");
+    }
+
+    #[test]
+    fn package_product_name_links_codex_data() {
+        let mut app = example_app("codex-msix");
+        app.name = "OpenAI.Codex".into();
+        app.package_family_name = Some("OpenAI.Codex_2p2nqsd0c76g0".into());
+        let (owner, ownership, status, _) = resolve_owner(
+            Path::new(r"C:\Users\Test\AppData\Roaming\Codex"), &[app]);
+        assert_eq!(owner.unwrap().name, "OpenAI.Codex");
+        assert_eq!(ownership, "likely");
+        assert_eq!(status, "not_orphaned");
+    }
+
+    #[test]
+    fn tft_alias_links_installed_teamfight_tactics_without_choosing_between_editions() {
+        let mut live = example_app("tft-live");
+        live.name = "Teamfight Tactics".into();
+        live.publisher = Some("Riot Games, Inc".into());
+        let mut pbe = example_app("tft-pbe");
+        pbe.name = "Teamfight Tactics PBE".into();
+        pbe.publisher = Some("Riot Games, Inc".into());
+        let apps = vec![live, pbe];
+        let (owner, ownership, status, evidence) = resolve_owner(
+            Path::new(r"C:\Users\Test\AppData\Local\TFT"), &apps);
+        assert!(owner.is_none());
+        assert_eq!(ownership, "shared");
+        assert_eq!(status, "associated_with_installed");
+        assert!(evidence[0].description.contains("Teamfight Tactics"));
+        let mut result = example_result(None, &ownership, &status);
+        result.path = r"C:\Users\Test\AppData\Local\TFT".into();
+        result.root = "Local".into();
+        enrich_directory(&mut result, &apps);
+        assert_eq!(result.owner_hint.as_deref(), Some("Teamfight Tactics"));
+    }
+
+    #[test]
+    fn nested_valheim_folder_and_publisher_link_iron_gate() {
+        let parent = std::env::temp_dir().join(format!("orphan-cleaner-test-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos())).join("IronGate");
+        fs::create_dir_all(parent.join("Valheim")).unwrap();
+        let mut app = example_app("valheim");
+        app.name = "Valheim".into();
+        app.publisher = Some("Iron Gate AB".into());
+        let owner = nested_installed_owner(&parent, &[app]).unwrap();
+        assert_eq!(owner.name, "Valheim");
+        fs::remove_dir_all(parent.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn listed_common_locations_are_recognized_without_an_orphan_claim() {
+        for (root, name) in [
+            ("Local", "wsl"), ("Local", "Temp"), ("ProgramData", "Package Cache"),
+            ("Local", "pnpm"), ("Local", "NuGet"), ("Local", "npm-cache"),
+            ("Local", "Pub"), ("Roaming", "npm"), ("Local", "CrashDumps"),
+            ("Local", "electron"), ("Local", "D3DSCache"), ("Local", "pnpm-cache"),
+            ("LocalLow", "Unfrozen"), ("Local", "pip"), ("Roaming", "EasyAntiCheat"),
+            ("Roaming", "AMD"), ("Local", "Comms"), ("Local", "electron-builder"),
+            ("Roaming", "Electron"), ("ProgramData", "Windows App Certification Kit"),
+            ("Local", "AMDSoftwareInstaller"),
+        ] {
+            let location = known_locations::lookup(root, name).unwrap_or_else(|| panic!("missing {root}/{name}"));
+            assert!(!location.possible_former, "{root}/{name} must not imply an uninstall");
+        }
+    }
+
+    #[test]
+    fn image_line_and_aion_are_only_possible_former_data() {
+        for (root, name) in [("Roaming", "Image-Line"), ("Local", "AION2")] {
+            let mut result = example_result(None, "unknown", "unknown");
+            result.root = root.into();
+            result.path = format!(r"C:\Users\Test\AppData\{root}\{name}");
+            enrich_directory(&mut result, &[]);
+            assert_eq!(result.orphan_status, "possibly_orphaned");
+            assert_eq!(result.ownership, "known_location");
+            assert!(result.owner.is_none());
+            assert!(result.owner_hint.is_some());
+        }
     }
 
     #[test]
@@ -463,13 +796,13 @@ mod tests {
 
     fn example_app(id: &str) -> Application {
         Application { id: id.into(), name: "Example".into(), publisher: None, version: None,
-            install_location: None, package_family_name: None, sources: vec!["registry".into()] }
+            install_location: None, display_icon_executable: None, package_family_name: None, sources: vec!["registry".into()] }
     }
 
     fn example_result(owner: Option<Application>, ownership: &str, status: &str) -> DirectoryResult {
         DirectoryResult { path: r"C:\Users\Test\AppData\Roaming\Example".into(), root: "Roaming".into(),
             size_bytes: 100, file_count: 1, directory_count: 0, newest_modified_unix: None,
-            skipped_entries: 0, owner, ownership: ownership.into(), orphan_status: status.into(), evidence: vec![] }
+            skipped_entries: 0, owner, owner_hint: None, ownership: ownership.into(), orphan_status: status.into(), evidence: vec![] }
     }
 
     #[test]

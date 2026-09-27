@@ -24,7 +24,10 @@ cargo check -p windows-orphan-cleaner
 - Reads per-user and machine uninstall registry entries in 32-bit and 64-bit views, plus current-user MSIX/AppX packages. If MSIX inventory fails, the UI reports it.
 - Finds Local, Roaming, LocalLow, and ProgramData through Windows Known Folder APIs, with a reported environment fallback when needed. It inspects children of Local `Packages` and `Programs` separately, recursively measuring each target without reading file contents.
 - Skips reparse points, reports inaccessible entries, supports cancellation, and streams results to the UI.
-- Links a directory to an installed app only by exact normalized product name, registered install path, or MSIX package family name. Everything else remains **unknown**.
+- Links a directory to an installed app by its normalized product name (including common version and architecture suffixes), registered install path, MSIX package family or product name, or an existing executable named by a registry `DisplayIcon` in that directory. Publisher and install-path component matches are shown as **vendor/shared associations** without assigning a single owner or declaring the contents safe or current.
+- Recognizes common Windows and development-tool data locations such as WSL, Temp, installer package caches, npm/pnpm/NuGet/Pub/pip, crash dumps, Direct3D cache, and Electron data. They are labeled **Known data**, without implying they are orphaned or safe to remove.
+- Links `Local\TFT` to installed Teamfight Tactics editions through its known folder alias. A publisher match plus the single `Valheim` child links `LocalLow\IronGate` to the installed game. No executable metadata is read from these data folders.
+- Shows `Roaming\Image-Line` and `Local\AION2` as **possible** former app data when no matching registration is found. This is a weak first-run inference: launcher-managed or portable installations may still use them.
 - Saves each completed four-root scan in a local SQLite database under the Tauri app-local-data directory. The most recent scan loads automatically on launch; **Refresh scan** is optional. A canceled or incomplete scan leaves the previous saved scan intact. Up to ten complete snapshots are retained for later history work.
 - Excludes its own app-local-data directory from scans, so the saved database does not inflate results.
 - On later scans, reuses an exact saved path-to-app relationship if the application has disappeared from a complete current inventory. Strong previous relationships are shown as **probable leftovers**; name-only relationships remain **possible leftovers**. Neither implies deletion safety.
@@ -32,4 +35,4 @@ cargo check -p windows-orphan-cleaner
 
 ## Planned next work
 
-Add richer active-application evidence, nested vendor-directory discovery, historical observations, and an audited validation corpus before making orphan claims. Cleanup remains out of scope until ownership and classification are reliable.
+Broaden historical observations and build an audited validation corpus before making stronger orphan claims. Nested vendor-directory discovery can follow once top-level ownership is reliable. Cleanup remains out of scope until ownership and classification are reliable.

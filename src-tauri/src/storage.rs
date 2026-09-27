@@ -125,7 +125,7 @@ mod tests {
                 results: vec![DirectoryResult {
                     path: format!(r"C:\Test\App{i}"), root: "Local".into(), size_bytes: i,
                     file_count: 1, directory_count: 0, newest_modified_unix: None,
-                    skipped_entries: 0, owner: None, ownership: "unknown".into(),
+                    skipped_entries: 0, owner: None, owner_hint: None, ownership: "unknown".into(),
                     orphan_status: "unknown".into(), evidence: vec![],
                 }],
             };
