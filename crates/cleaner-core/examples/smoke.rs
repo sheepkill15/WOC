@@ -14,4 +14,6 @@ fn main() {
         if seen >= 5 { cancel.store(true, Ordering::Relaxed); }
     }, |_| {});
     println!("Inspected {} directories; canceled: {}", summary.directories, summary.canceled);
+    println!("Scanned roots: {}", summary.scanned_roots.join(", "));
+    for warning in &summary.warnings { println!("Scan warning: {warning}"); }
 }

@@ -1,12 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
+use windows::core::GUID;
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
+use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_ProgramData, FOLDERID_RoamingAppData};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +73,8 @@ pub struct ScanSummary {
     pub bytes: u64,
     pub skipped_entries: u64,
     pub canceled: bool,
+    pub scanned_roots: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 pub fn normalize_name(value: &str) -> String {
@@ -155,22 +162,49 @@ pub fn installed_applications() -> Inventory {
     Inventory { applications, warnings }
 }
 
-fn scan_roots() -> Vec<(String, PathBuf)> {
+fn known_folder_path(id: &GUID) -> Option<PathBuf> {
+    // SHGetKnownFolderPath requires COM on the current scan thread.
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let path = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.ok().and_then(|wide| {
+        let raw = wide.0;
+        if raw.is_null() { return None; }
+        let mut length = 0;
+        // The API returns a null-terminated UTF-16 buffer owned by the caller.
+        unsafe { while *raw.add(length) != 0 { length += 1; } }
+        let path = PathBuf::from(OsString::from_wide(unsafe { std::slice::from_raw_parts(raw, length) }));
+        unsafe { CoTaskMemFree(Some(raw.cast())); }
+        Some(path)
+    });
+    if initialized { unsafe { CoUninitialize(); } }
+    path
+}
+
+fn scan_roots() -> (Vec<(String, PathBuf)>, Vec<String>) {
     let mut roots = Vec::new();
-    for (label, variable) in [("Local", "LOCALAPPDATA"), ("Roaming", "APPDATA"), ("ProgramData", "PROGRAMDATA")] {
-        if let Some(path) = std::env::var_os(variable).map(PathBuf::from).filter(|p| p.is_dir()) {
-            roots.push((label.to_owned(), path));
-        }
-    }
-    if let Some(profile) = std::env::var_os("USERPROFILE") {
-        let path = PathBuf::from(profile).join("AppData").join("LocalLow");
-        if path.is_dir() {
-            roots.push(("LocalLow".to_owned(), path));
+    let mut warnings = Vec::new();
+    for (label, id, fallback) in [
+        ("Local", &FOLDERID_LocalAppData, "LOCALAPPDATA"),
+        ("Roaming", &FOLDERID_RoamingAppData, "APPDATA"),
+        ("LocalLow", &FOLDERID_LocalAppDataLow, ""),
+        ("ProgramData", &FOLDERID_ProgramData, "PROGRAMDATA"),
+    ] {
+        let known = known_folder_path(id);
+        let path = known.or_else(|| {
+            warnings.push(format!("Windows Known Folder lookup failed for {label}; using the environment fallback."));
+            if label == "LocalLow" {
+                std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join("AppData").join("LocalLow"))
+            } else {
+                std::env::var_os(fallback).map(PathBuf::from)
+            }
+        });
+        match path {
+            Some(path) if path.is_dir() => roots.push((label.to_owned(), path)),
+            _ => warnings.push(format!("{label} could not be scanned because its folder is unavailable.")),
         }
     }
     let mut seen = HashSet::new();
     roots.retain(|(_, path)| seen.insert(path.to_string_lossy().to_lowercase()));
-    roots
+    (roots, warnings)
 }
 
 #[cfg(windows)]
@@ -293,12 +327,16 @@ where
     P: FnMut(String),
 {
     let mut summary = ScanSummary::default();
-    for (label, root) in scan_roots() {
+    let (roots, warnings) = scan_roots();
+    summary.warnings = warnings;
+    for (label, root) in roots {
         if cancel.load(Ordering::Relaxed) { break; }
         let Ok(entries) = fs::read_dir(&root) else {
             summary.skipped_entries += 1;
+            summary.warnings.push(format!("{label} could not be enumerated: {}", root.display()));
             continue;
         };
+        summary.scanned_roots.push(format!("{label}: {}", root.display()));
         for entry in entries {
             if cancel.load(Ordering::Relaxed) { break; }
             let Ok(entry) = entry else { summary.skipped_entries += 1; continue; };

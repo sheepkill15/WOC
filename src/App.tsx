@@ -10,7 +10,7 @@ type DirectoryResult = {
   newestModifiedUnix: number | null; skippedEntries: number; owner: Application | null;
   ownership: string; orphanStatus: string; evidence: Evidence[];
 };
-type ScanSummary = { directories: number; bytes: number; skippedEntries: number; canceled: boolean };
+type ScanSummary = { directories: number; bytes: number; skippedEntries: number; canceled: boolean; scannedRoots: string[]; warnings: string[] };
 const native = "__TAURI_INTERNALS__" in window;
 
 function formatBytes(bytes: number): string {
@@ -109,6 +109,8 @@ export default function App() {
       </section>
       {running && <div className="progress"><div className="progress-pulse" /><div><strong>Scanning directories…</strong><span title={currentPath}>{currentPath || "Preparing application inventory"}</span></div></div>}
       {summary && summary.skippedEntries > 0 && <div className="notice">{summary.skippedEntries.toLocaleString()} entries were inaccessible or skipped, including reparse points. Sizes may be incomplete.</div>}
+      {summary?.warnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
+      {summary && <div className="scan-coverage" title={summary.scannedRoots.join("\n")}>Scanned roots: {summary.scannedRoots.map(root => root.split(": ")[0]).join(", ") || "none"}{summary.canceled ? " (partial scan)" : ""}</div>}
       <div className="section-heading"><div><h2>Application data</h2><p>Unmatched means ownership is unknown. It does not mean safe to remove.</p></div></div>
       <div className="toolbar"><div className="tabs"><button className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>All <span>{results.length}</span></button><button className={filter === "matched" ? "selected" : ""} onClick={() => setFilter("matched")}>Matched <span>{matched}</span></button><button className={filter === "unknown" ? "selected" : ""} onClick={() => setFilter("unknown")}>Unknown <span>{results.length - matched}</span></button></div><input aria-label="Search directories" placeholder="Search directories or applications" value={query} onChange={event => setQuery(event.target.value)} /></div>
       <div className="content-grid"><div className="table-wrap"><table><thead><tr><th>Directory</th><th>Size</th><th>Probable owner</th></tr></thead><tbody>{visible.map(result => <tr key={result.path} className={selectedPath === result.path ? "selected-row" : ""} onClick={() => setSelectedPath(result.path)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPath(result.path); } }} tabIndex={0} aria-selected={selectedPath === result.path}><td><strong>{shortPath(result.path)}</strong><small title={result.path}>{result.path}</small></td><td>{formatBytes(result.sizeBytes)}</td><td><span className="owner-name">{result.owner?.name ?? "Unresolved"}</span><span className={`badge ${result.owner ? "matched" : "unknown"}`}>{result.owner ? "Installed match" : "Unknown"}</span></td></tr>)}</tbody></table>{visible.length === 0 && <div className="empty">{results.length === 0 ? "Start a scan to inspect application data directories." : "No directories match these filters."}</div>}</div>
