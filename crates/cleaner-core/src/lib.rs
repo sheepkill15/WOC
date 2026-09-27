@@ -1,7 +1,8 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
@@ -15,7 +16,25 @@ pub struct Application {
     pub publisher: Option<String>,
     pub version: Option<String>,
     pub install_location: Option<String>,
+    pub package_family_name: Option<String>,
     pub sources: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Inventory {
+    pub applications: Vec<Application>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct AppxPackage {
+    name: String,
+    publisher_display_name: Option<String>,
+    version: Option<String>,
+    install_location: Option<String>,
+    package_family_name: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -55,7 +74,7 @@ pub fn normalize_name(value: &str) -> String {
     value.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-pub fn installed_applications() -> Vec<Application> {
+fn registry_applications() -> Vec<Application> {
     let mut found: HashMap<String, Application> = HashMap::new();
     for (hive, hive_name) in [
         (RegKey::predef(HKEY_CURRENT_USER), "HKCU"),
@@ -92,7 +111,7 @@ pub fn installed_applications() -> Vec<Application> {
                         existing.install_location = install_location;
                     }
                 } else {
-                    found.insert(key, Application { id, name, publisher, version, install_location, sources: vec![source] });
+                    found.insert(key, Application { id, name, publisher, version, install_location, package_family_name: None, sources: vec![source] });
                 }
             }
         }
@@ -100,6 +119,40 @@ pub fn installed_applications() -> Vec<Application> {
     let mut apps: Vec<_> = found.into_values().collect();
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     apps
+}
+
+fn msix_applications() -> Result<Vec<Application>, String> {
+    // This fixed, read-only command avoids loading or executing anything found during scanning.
+    let script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ConvertTo-Json -InputObject @(Get-AppxPackage | Select-Object Name,PublisherDisplayName,Version,InstallLocation,PackageFamilyName) -Depth 3 -Compress";
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+        .map_err(|err| format!("MSIX inventory could not start: {err}"))?;
+    if !output.status.success() {
+        return Err("MSIX inventory failed; package data will remain unknown.".into());
+    }
+    let packages: Vec<AppxPackage> = serde_json::from_slice(&output.stdout)
+        .map_err(|err| format!("MSIX inventory output was unreadable: {err}"))?;
+    Ok(packages.into_iter().filter(|p| !p.package_family_name.is_empty()).map(|package| Application {
+        id: format!("msix:{}", package.package_family_name),
+        name: package.name,
+        publisher: package.publisher_display_name,
+        version: package.version,
+        install_location: package.install_location.filter(|s| !s.is_empty()),
+        package_family_name: Some(package.package_family_name),
+        sources: vec!["Current-user MSIX/AppX package".into()],
+    }).collect())
+}
+
+pub fn installed_applications() -> Inventory {
+    let mut applications = registry_applications();
+    let mut warnings = Vec::new();
+    match msix_applications() {
+        Ok(mut packages) => applications.append(&mut packages),
+        Err(warning) => warnings.push(warning),
+    }
+    applications.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Inventory { applications, warnings }
 }
 
 fn scan_roots() -> Vec<(String, PathBuf)> {
@@ -184,28 +237,54 @@ fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, Str
         return (None, "unknown".into(), "unknown".into(), vec![]);
     }
     let path_string = path.to_string_lossy().to_lowercase();
-    let mut matches = Vec::new();
+    let is_package_data = path.parent().and_then(Path::file_name).is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Packages"));
+    let mut strong = Vec::new();
+    let mut names = Vec::new();
     for app in apps {
         let exact_name = normalize_name(&app.name) == normalized;
         let exact_install = app.install_location.as_deref().is_some_and(|location| {
             Path::new(location).to_string_lossy().trim_end_matches(['\\', '/']).eq_ignore_ascii_case(&path_string)
         });
-        if exact_name || exact_install {
-            matches.push((app, exact_name, exact_install));
+        let exact_package = is_package_data && app.package_family_name.as_deref().is_some_and(|family| family.eq_ignore_ascii_case(&basename));
+        if exact_install || exact_package {
+            strong.push((app, exact_install, exact_package));
+        } else if exact_name {
+            names.push(app);
         }
     }
-    if matches.len() != 1 {
-        let evidence = if matches.len() > 1 { vec![Evidence { kind: "multiple_matches".into(), description: "Several installed applications match this directory; ownership is ambiguous.".into(), strength: "weak".into() }] } else { vec![] };
+    if strong.len() > 1 || (strong.is_empty() && names.len() > 1) {
+        let evidence = vec![Evidence { kind: "multiple_matches".into(), description: "Several installed applications match this directory; ownership is ambiguous.".into(), strength: "weak".into() }];
         return (None, "unknown".into(), "unknown".into(), evidence);
     }
-    let (app, exact_name, exact_install) = matches[0];
-    let evidence = if exact_install {
-        vec![Evidence { kind: "install_path_match".into(), description: format!("The installed application's registered path is this directory ({}).", app.sources.join(", ")), strength: "strong".into() }]
-    } else if exact_name {
-        vec![Evidence { kind: "directory_name_match".into(), description: format!("The directory name exactly matches installed application “{}”.", app.name), strength: "medium".into() }]
-    } else { vec![] };
-    let ownership = if exact_install { "confirmed" } else { "likely" };
+    let (app, ownership, evidence) = if let Some((app, install, package)) = strong.first() {
+        let (kind, description) = if *package {
+            ("package_family_match", format!("Directory matches installed package family {}.", app.package_family_name.as_deref().unwrap_or_default()))
+        } else if *install {
+            ("install_path_match", format!("The installed application's registered path is this directory ({}).", app.sources.join(", ")))
+        } else { unreachable!() };
+        (*app, "confirmed", vec![Evidence { kind: kind.into(), description, strength: "strong".into() }])
+    } else if let Some(app) = names.first() {
+        (*app, "likely", vec![Evidence { kind: "directory_name_match".into(), description: format!("The directory name exactly matches installed application “{}”.", app.name), strength: "medium".into() }])
+    } else {
+        return (None, "unknown".into(), "unknown".into(), vec![]);
+    };
     (Some(app.clone()), ownership.into(), "not_orphaned".into(), evidence)
+}
+
+fn scan_target(path: PathBuf, root: &str, apps: &[Application], cancel: &AtomicBool, summary: &mut ScanSummary, on_result: &mut impl FnMut(DirectoryResult), on_progress: &mut impl FnMut(String)) {
+    if cancel.load(Ordering::Relaxed) { return; }
+    on_progress(path.to_string_lossy().into_owned());
+    let (size, files, directories, newest, skipped) = inspect_directory(&path, cancel);
+    if cancel.load(Ordering::Relaxed) { return; }
+    let (owner, ownership, orphan_status, evidence) = resolve_owner(&path, apps);
+    summary.directories += 1;
+    summary.bytes = summary.bytes.saturating_add(size);
+    summary.skipped_entries += skipped;
+    on_result(DirectoryResult {
+        path: path.to_string_lossy().into_owned(), root: root.to_owned(), size_bytes: size,
+        file_count: files, directory_count: directories, newest_modified_unix: newest,
+        skipped_entries: skipped, owner, ownership, orphan_status, evidence,
+    });
 }
 
 pub fn scan<F, P>(apps: &[Application], cancel: &AtomicBool, mut on_result: F, mut on_progress: P) -> ScanSummary
@@ -226,18 +305,20 @@ where
             let Ok(metadata) = fs::symlink_metadata(entry.path()) else { summary.skipped_entries += 1; continue; };
             if !metadata.is_dir() || is_reparse_point(&metadata) { continue; }
             let path = entry.path();
-            on_progress(path.to_string_lossy().into_owned());
-            let (size, files, directories, newest, skipped) = inspect_directory(&path, cancel);
-            if cancel.load(Ordering::Relaxed) { break; }
-            let (owner, ownership, orphan_status, evidence) = resolve_owner(&path, apps);
-            summary.directories += 1;
-            summary.bytes = summary.bytes.saturating_add(size);
-            summary.skipped_entries += skipped;
-            on_result(DirectoryResult {
-                path: path.to_string_lossy().into_owned(), root: label.clone(), size_bytes: size,
-                file_count: files, directory_count: directories, newest_modified_unix: newest,
-                skipped_entries: skipped, owner, ownership, orphan_status, evidence,
-            });
+            let structural_container = label == "Local" && ["Packages", "Programs"].iter().any(|name| entry.file_name().to_string_lossy().eq_ignore_ascii_case(name));
+            if structural_container {
+                let Ok(children) = fs::read_dir(&path) else { summary.skipped_entries += 1; continue; };
+                for child in children {
+                    if cancel.load(Ordering::Relaxed) { break; }
+                    let Ok(child) = child else { summary.skipped_entries += 1; continue; };
+                    let child_path = child.path();
+                    let Ok(child_metadata) = fs::symlink_metadata(&child_path) else { summary.skipped_entries += 1; continue; };
+                    if !child_metadata.is_dir() || is_reparse_point(&child_metadata) { continue; }
+                    scan_target(child_path, &label, apps, cancel, &mut summary, &mut on_result, &mut on_progress);
+                }
+            } else {
+                scan_target(path, &label, apps, cancel, &mut summary, &mut on_result, &mut on_progress);
+            }
         }
     }
     summary.canceled = cancel.load(Ordering::Relaxed);
@@ -263,11 +344,22 @@ mod tests {
 
     #[test]
     fn active_exact_match_is_not_orphaned() {
-        let app = Application { id: "test".into(), name: "Notion".into(), publisher: None, version: None, install_location: None, sources: vec!["test".into()] };
+        let app = Application { id: "test".into(), name: "Notion".into(), publisher: None, version: None, install_location: None, package_family_name: None, sources: vec!["test".into()] };
         let (owner, ownership, orphan, evidence) = resolve_owner(Path::new(r"C:\Users\Test\AppData\Roaming\Notion"), &[app]);
         assert_eq!(owner.unwrap().name, "Notion");
         assert_eq!(ownership, "likely");
         assert_eq!(orphan, "not_orphaned");
         assert_eq!(evidence.len(), 1);
+    }
+
+    #[test]
+    fn package_family_beats_an_unrelated_name_match() {
+        let package = Application { id: "package".into(), name: "Calculator".into(), publisher: None, version: None, install_location: None, package_family_name: Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe".into()), sources: vec!["MSIX".into()] };
+        let unrelated = Application { id: "name".into(), name: "Microsoft.WindowsCalculator_8wekyb3d8bbwe".into(), publisher: None, version: None, install_location: None, package_family_name: None, sources: vec!["registry".into()] };
+        let (owner, ownership, orphan, evidence) = resolve_owner(Path::new(r"C:\Users\Test\AppData\Local\Packages\Microsoft.WindowsCalculator_8wekyb3d8bbwe"), &[package, unrelated]);
+        assert_eq!(owner.unwrap().id, "package");
+        assert_eq!(ownership, "confirmed");
+        assert_eq!(orphan, "not_orphaned");
+        assert_eq!(evidence[0].kind, "package_family_match");
     }
 }

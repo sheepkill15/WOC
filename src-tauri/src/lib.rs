@@ -1,4 +1,4 @@
-use cleaner_core::{Application, DirectoryResult, ScanSummary};
+use cleaner_core::{DirectoryResult, Inventory, ScanSummary};
 use serde::Serialize;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -15,7 +15,7 @@ struct ProgressEvent {
 }
 
 #[tauri::command]
-fn installed_applications() -> Vec<Application> {
+fn installed_applications() -> Inventory {
     cleaner_core::installed_applications()
 }
 
@@ -30,9 +30,10 @@ fn start_scan(app: AppHandle, state: State<'_, ScanState>) -> Result<(), String>
         *active = Some(cancel.clone());
     }
     std::thread::spawn(move || {
-        let apps = cleaner_core::installed_applications();
+        let inventory = cleaner_core::installed_applications();
+        let _ = app.emit("scan-inventory", &inventory);
         let summary = cleaner_core::scan(
-            &apps,
+            &inventory.applications,
             &cancel,
             |result: DirectoryResult| { let _ = app.emit("scan-result", result); },
             |path| { let _ = app.emit("scan-progress", ProgressEvent { path }); },

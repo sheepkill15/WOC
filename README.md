@@ -21,12 +21,12 @@ cargo check -p windows-orphan-cleaner
 
 ## Current behavior
 
-- Reads per-user and machine uninstall registry entries in 32-bit and 64-bit views.
-- Scans immediate application directories under Local, Roaming, LocalLow, and ProgramData; recursively measures each directory without reading file contents.
+- Reads per-user and machine uninstall registry entries in 32-bit and 64-bit views, plus current-user MSIX/AppX packages. If MSIX inventory fails, the UI reports it.
+- Scans immediate application directories under Local, Roaming, LocalLow, and ProgramData. It inspects children of Local `Packages` and `Programs` separately, recursively measuring each target without reading file contents.
 - Skips reparse points, reports inaccessible entries, supports cancellation, and streams results to the UI.
-- Links a directory to an installed app only by exact normalized product name or registered install path. Everything else remains **unknown**.
+- Links a directory to an installed app only by exact normalized product name, registered install path, or MSIX package family name. Everything else remains **unknown**.
 - Cannot delete, quarantine, or modify discovered resources.
 
 ## Planned next work
 
-Add MSIX/AppX inventory, richer active-application evidence, nested vendor-directory discovery, historical observations, and an audited validation corpus before making orphan claims. Cleanup remains out of scope until ownership and classification are reliable.
+Add richer active-application evidence, nested vendor-directory discovery, historical observations, and an audited validation corpus before making orphan claims. Cleanup remains out of scope until ownership and classification are reliable.

@@ -2,11 +2,12 @@ use cleaner_core::{installed_applications, scan};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 fn main() {
-    let apps = installed_applications();
-    println!("Registry applications: {}", apps.len());
+    let inventory = installed_applications();
+    println!("Installed applications: {}", inventory.applications.len());
+    for warning in &inventory.warnings { println!("Inventory warning: {warning}"); }
     let cancel = AtomicBool::new(false);
     let mut seen = 0;
-    let summary = scan(&apps, &cancel, |result| {
+    let summary = scan(&inventory.applications, &cancel, |result| {
         println!("{} | {} bytes | {} | {} skipped", result.path, result.size_bytes,
             result.owner.as_ref().map(|app| app.name.as_str()).unwrap_or("unknown"), result.skipped_entries);
         seen += 1;

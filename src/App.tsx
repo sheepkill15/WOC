@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-type Application = { id: string; name: string; publisher: string | null; version: string | null; installLocation: string | null; sources: string[] };
+type Application = { id: string; name: string; publisher: string | null; version: string | null; installLocation: string | null; packageFamilyName: string | null; sources: string[] };
+type Inventory = { applications: Application[]; warnings: string[] };
 type Evidence = { kind: string; description: string; strength: string };
 type DirectoryResult = {
   path: string; root: string; sizeBytes: number; fileCount: number; directoryCount: number;
@@ -28,6 +29,7 @@ function shortPath(path: string): string {
 
 export default function App() {
   const [apps, setApps] = useState<Application[]>([]);
+  const [inventoryWarnings, setInventoryWarnings] = useState<string[]>([]);
   const [results, setResults] = useState<DirectoryResult[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -53,8 +55,11 @@ export default function App() {
         register(await listen<ScanSummary>("scan-finished", event => {
           if (mounted) { setSummary(event.payload); setRunning(false); setCurrentPath(""); }
         }));
-        const inventory = await invoke<Application[]>("installed_applications");
-        if (mounted) setApps(inventory);
+        register(await listen<Inventory>("scan-inventory", event => {
+          if (mounted) { setApps(event.payload.applications); setInventoryWarnings(event.payload.warnings); }
+        }));
+        const inventory = await invoke<Inventory>("installed_applications");
+        if (mounted) { setApps(inventory.applications); setInventoryWarnings(inventory.warnings); }
       } catch (cause) {
         if (mounted) setError(String(cause));
       }
@@ -95,8 +100,9 @@ export default function App() {
       <header className="topbar"><div><div className="eyebrow">LOCAL ANALYSIS · WINDOWS 10/11</div><h1>Directory inventory</h1><p>See which application data can be linked to installed software.</p></div><div className="top-actions">{running ? <button className="secondary" onClick={cancel}>Cancel scan</button> : <button className="primary" onClick={() => void start()} disabled={!native}>Start scan</button>}</div></header>
       {!native && <div className="notice">Open this project with Tauri to scan this Windows installation. The web preview cannot access your application data.</div>}
       {error && <div className="notice error">{error}</div>}
+      {inventoryWarnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
       <section className="stats">
-        <div><span>Installed apps found</span><strong>{apps.length}</strong><small>Uninstall registry inventory</small></div>
+        <div><span>Installed apps found</span><strong>{apps.length}</strong><small>Registry and current-user MSIX</small></div>
         <div><span>Directories inspected</span><strong>{results.length}</strong><small>{running ? "Scan in progress" : summary ? summary.canceled ? "Scan canceled" : "Scan complete" : "Awaiting scan"}</small></div>
         <div><span>Matched to installed apps</span><strong>{matched}</strong><small>Exact name or install path</small></div>
         <div><span>Inspected storage</span><strong>{formatBytes(total)}</strong><small>Excludes inaccessible entries</small></div>

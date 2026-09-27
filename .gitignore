@@ -6,3 +6,4 @@ src-tauri/icons/android/
 src-tauri/icons/ios/
 src-tauri/icons/icon.icns
 *.log
+*.tsbuildinfo
