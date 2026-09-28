@@ -42,8 +42,8 @@ export function Inventory({ focusPath, clearFocus }: { focusPath: string | null;
   const tabs: [typeof group, string][] = [["all", "All"], ["matched", "Installed"], ["former", "Leftovers"], ["unregistered", "Unregistered"], ["known", "Known / Windows"], ["unknown", "Unknown"]];
 
   return <div className="page page-wide">
-    <PageHeader eyebrow={summary ? `${summary.mode === "deep" ? "Deep" : "Quick"} scan` : undefined} title="All folders"
-      description="Every inspected folder with its probable owner. Unknown means no reliable owner was found — not that it is safe to remove." />
+    <PageHeader title="All folders"
+      description={<>Every folder the {summary?.mode === "deep" ? "deep" : "quick"} scan inspected, with its probable owner. Click a row to see the evidence. To remove something, use <b>Cleanup</b>; “Unknown” does not mean safe to remove.</>} />
     {running && <div className="progress-line"><span className="spinner" /><span title={progressPath}>{progressPath || "Preparing…"}</span><b>{results.length.toLocaleString()} folders so far</b></div>}
     <div className="toolbar">
       <div className="tabs">{tabs.map(([key, label]) => <button key={key} className={group === key ? "selected" : ""} onClick={() => setGroup(key)}>{label}<span>{counts[key]}</span></button>)}</div>

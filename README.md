@@ -43,8 +43,8 @@ cargo check --workspace --all-targets
 
 **Scan modes** (spec §29)
 
-- *Quick*: AppData (Local, Roaming, LocalLow) and ProgramData, the installed-application inventory, and system references.
-- *Deep*: adds Program Files (64- and 32-bit), developer folders in the user profile (`.gradle`, `.m2`, `.cargo`, `.nuget`, `.npm`, `.android`, conda, …) and executable metadata.
+- *Quick*: AppData (Local, Roaming, LocalLow), ProgramData, the user's Downloads, Public files, and other `Downloads` folders found at the root or one level below the root of fixed drives, plus the installed-application inventory and system references. It may take longer when Downloads contains many files.
+- *Deep*: adds Program Files folders on fixed drives, all top-level user-profile folders except AppData (already covered), Documents, Desktop, Pictures, Music, Videos and Saved Games (including redirected Known Folders), top-level `Temp` folders on fixed drives, and exact registered install folders not already covered by another root, plus executable metadata. Loose files in the profile root and redirected-folder containers are included. Personal folders are for review only and never become cleanup candidates. Fixed-drive discovery skips removable and network drives.
 - *Post-uninstall check*: when applications disappear from the inventory, re-measures only the folders previously linked to them. Offered on launch and on the Uninstalled apps page. Not saved as a snapshot.
 
 Directories are measured on a small worker pool (at most four threads, to limit disk thrashing) and results stream to the UI while the scan runs. File contents are never read.

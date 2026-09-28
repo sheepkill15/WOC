@@ -19,7 +19,7 @@ export function Rules() {
   const keptCategories = new Set(rules.filter(rule => rule.kind === "category").map(rule => rule.value));
 
   return <div className="page">
-    <PageHeader eyebrow="Your decisions" title="Ignore rules" description="Tell the cleaner what you intend to keep, so it stops asking." />
+    <PageHeader title="Ignore rules" description="Tell the cleaner what you intend to keep, so it stops asking." />
     <div className="rule-forms">
       <form className="card" onSubmit={event => { event.preventDefault(); if (path.trim()) { void addRule("path", path.trim(), path.trim()); setPath(""); } }}>
         <h3>Ignore a folder</h3>

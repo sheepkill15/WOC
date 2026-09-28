@@ -144,7 +144,7 @@ export function FolderAnalyzer({ connected }: { connected: boolean }) {
   }
 
   return <div className="page">
-    <PageHeader eyebrow="Works in the browser" title="Folder analyzer"
+    <PageHeader title="Folder analyzer"
       description="Pick any folder to find large and old files, duplicates, empty folders and regenerable project artifacts such as node_modules or build output. Read-only; files never leave this computer."
       actions={supported && (running
         ? <button className="secondary" onClick={() => { cancel.current = true; }}><Icon name="stop" size={15} /> Stop</button>

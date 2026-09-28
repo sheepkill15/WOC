@@ -9,9 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
 use winreg::RegKey;
-use windows::core::GUID;
+use windows::core::{GUID, PCWSTR};
+use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
-use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_CommonPrograms, FOLDERID_CommonStartup, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Favorites, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_SavedGames, FOLDERID_Videos, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_RoamingAppData, FOLDERID_Startup};
+use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_CommonPrograms, FOLDERID_CommonStartup, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Favorites, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Public, FOLDERID_SavedGames, FOLDERID_Videos, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_RoamingAppData, FOLDERID_Startup};
 
 mod known_locations;
 pub mod assessment;
@@ -577,10 +578,10 @@ pub fn shortcut_roots() -> Vec<PathBuf> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanMode {
-    /// AppData and ProgramData (spec §29 quick scan).
+    /// AppData, ProgramData, Downloads, Public, and other fixed-drive Downloads.
     #[default]
     Quick,
-    /// Adds Program Files, developer folders in the user profile, and executable metadata.
+    /// Adds Program Files, personal folders, the user profile, and executable metadata.
     Deep,
 }
 
@@ -602,6 +603,73 @@ pub struct ScanRoot {
 }
 
 pub fn scan_roots(mode: ScanMode) -> (Vec<ScanRoot>, Vec<String>, usize) {
+    scan_roots_with_apps(mode, &[])
+}
+
+fn fixed_drives() -> Result<Vec<PathBuf>, String> {
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 { return Err("Windows could not enumerate logical drives.".into()); }
+    let mut drives = Vec::new();
+    for index in 0..26u32 {
+        if mask & (1 << index) == 0 { continue; }
+        let root = format!("{}:\\", (b'A' + index as u8) as char);
+        let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+        // DRIVE_FIXED = 3; removable and network drives are deliberately omitted.
+        if unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) } == 3 {
+            drives.push(PathBuf::from(root));
+        }
+    }
+    Ok(drives)
+}
+
+fn discover_conventional_roots(drives: &[PathBuf]) -> Vec<ScanRoot> {
+    let mut roots = Vec::new();
+    for drive in drives {
+        for top in fs::read_dir(drive).into_iter().flatten().flatten() {
+            let path = top.path();
+            let Ok(metadata) = fs::symlink_metadata(&path) else { continue; };
+            if !metadata.is_dir() || is_reparse_point(&metadata) { continue; }
+            let name = top.file_name().to_string_lossy().to_ascii_lowercase();
+            if name == "downloads" {
+                roots.push(ScanRoot { label: "OtherDownloads".into(), path });
+                continue;
+            }
+            if name == "temp" || name == "tmp" {
+                roots.push(ScanRoot { label: "OtherTemp".into(), path });
+                continue;
+            }
+            if name == "program files" || name == "program files (x86)" {
+                roots.push(ScanRoot { label: if name == "program files" { "ProgramFiles" } else { "ProgramFilesX86" }.into(), path });
+                continue;
+            }
+            if matches!(name.as_str(), "users" | "windows" | "programdata" | "windowsapps" | "system volume information" | "$recycle.bin" | "recovery") { continue; }
+            let child_path = path.join("Downloads");
+            if fs::symlink_metadata(&child_path).is_ok_and(|metadata| metadata.is_dir() && !is_reparse_point(&metadata)) {
+                roots.push(ScanRoot { label: "OtherDownloads".into(), path: child_path });
+            }
+        }
+    }
+    roots
+}
+
+fn add_registered_install_roots(roots: &mut Vec<ScanRoot>, drives: &[PathBuf], apps: &[Application]) -> usize {
+    let mut added = 0;
+    for app in apps {
+        let Some(location) = app.install_location.as_deref() else { continue; };
+        let path = PathBuf::from(location.trim().trim_matches('"'));
+        if !path.is_absolute() || path.components().count() < 4 { continue; }
+        let name = path.file_name().map(|name| name.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        if matches!(name.as_str(), "games" | "steamapps" | "common" | "program files" | "program files (x86)" | "windowsapps" | "users" | "documents" | "downloads" | "temp" | "tmp" | "mods" | "backup" | "backups") { continue; }
+        if !drives.iter().any(|drive| references::path_is_within(&path.to_string_lossy(), &drive.to_string_lossy())) { continue; }
+        if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir() && !is_reparse_point(&metadata)) { continue; }
+        if roots.iter().any(|root| references::path_is_within(&path.to_string_lossy(), &root.path.to_string_lossy())) { continue; }
+        added += 1;
+        roots.push(ScanRoot { label: "RegisteredInstall".into(), path });
+    }
+    added
+}
+
+fn scan_roots_with_apps(mode: ScanMode, apps: &[Application]) -> (Vec<ScanRoot>, Vec<String>, usize) {
     let mut roots = Vec::new();
     let mut warnings = Vec::new();
     let mut entries: Vec<(&str, &GUID, &str)> = vec![
@@ -609,27 +677,58 @@ pub fn scan_roots(mode: ScanMode) -> (Vec<ScanRoot>, Vec<String>, usize) {
         ("Roaming", &FOLDERID_RoamingAppData, "APPDATA"),
         ("LocalLow", &FOLDERID_LocalAppDataLow, ""),
         ("ProgramData", &FOLDERID_ProgramData, "PROGRAMDATA"),
+        ("Downloads", &FOLDERID_Downloads, ""),
+        ("Public", &FOLDERID_Public, "PUBLIC"),
     ];
     if mode == ScanMode::Deep {
         entries.push(("ProgramFiles", &FOLDERID_ProgramFilesX64, "ProgramW6432"));
         entries.push(("ProgramFilesX86", &FOLDERID_ProgramFilesX86, "ProgramFiles(x86)"));
+        entries.push(("Documents", &FOLDERID_Documents, ""));
+        entries.push(("Desktop", &FOLDERID_Desktop, ""));
+        entries.push(("Pictures", &FOLDERID_Pictures, ""));
+        entries.push(("Music", &FOLDERID_Music, ""));
+        entries.push(("Videos", &FOLDERID_Videos, ""));
+        entries.push(("SavedGames", &FOLDERID_SavedGames, ""));
         entries.push(("UserProfile", &FOLDERID_Profile, "USERPROFILE"));
     }
-    let expected = entries.len();
+    let mut expected = entries.len();
     for (label, id, fallback) in entries {
+        let optional_personal = matches!(label, "Documents" | "Downloads" | "Public" | "Desktop" | "Pictures" | "Music" | "Videos" | "SavedGames");
         let known = known_folder_path(id);
         let path = known.or_else(|| {
-            warnings.push(format!("Windows Known Folder lookup failed for {label}; using the environment fallback."));
-            if label == "LocalLow" {
+            let fallback_path = if label == "LocalLow" {
                 std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join("AppData").join("LocalLow"))
+            } else if fallback.is_empty() {
+                let folder = if label == "SavedGames" { "Saved Games" } else { label };
+                std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join(folder))
             } else {
                 std::env::var_os(fallback).map(PathBuf::from)
+            };
+            if !optional_personal || fallback_path.as_ref().is_some_and(|path| path.is_dir()) {
+                warnings.push(format!("Windows Known Folder lookup failed for {label}; using the environment fallback."));
             }
+            fallback_path
         });
         match path {
             Some(path) if path.is_dir() => roots.push(ScanRoot { label: label.to_owned(), path }),
+            _ if optional_personal => expected -= 1,
             _ => warnings.push(format!("{label} could not be scanned because its folder is unavailable.")),
         }
+    }
+    let drives = match fixed_drives() {
+        Ok(drives) => drives,
+        Err(error) => {
+            warnings.push(format!("Additional fixed-drive folders were not discovered: {error}"));
+            Vec::new()
+        }
+    };
+    for root in discover_conventional_roots(&drives) {
+        if mode != ScanMode::Deep && root.label != "OtherDownloads" { continue; }
+        expected += 1;
+        roots.push(root);
+    }
+    if mode == ScanMode::Deep {
+        expected += add_registered_install_roots(&mut roots, &drives, apps);
     }
     let mut seen = HashSet::new();
     let before = roots.len();
@@ -670,6 +769,10 @@ pub struct DirectoryStats {
 }
 
 pub fn inspect_directory(path: &Path, cancel: &AtomicBool) -> DirectoryStats {
+    inspect_directory_inner(path, cancel, false)
+}
+
+fn inspect_directory_inner(path: &Path, cancel: &AtomicBool, loose_only: bool) -> DirectoryStats {
     use content::{ChildAccumulator, LARGE_FILE_BYTES, MAX_TRACKED_CHILDREN};
     let mut stats = DirectoryStats {
         created: fs::metadata(path).ok().and_then(|metadata| unix_seconds(metadata.created())),
@@ -702,6 +805,7 @@ pub fn inspect_directory(path: &Path, cancel: &AtomicBool) -> DirectoryStats {
                 continue;
             }
             if metadata.is_dir() {
+                if loose_only { continue; }
                 stats.directories += 1;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let index = match child_index {
@@ -992,7 +1096,25 @@ pub fn classify_directory(path: &Path, root: &str, apps: &[Application]) -> Dire
         ..Default::default()
     };
     enrich_directory(&mut result, apps);
+    if is_personal_scan_target(root, path) {
+        result.location_class = Some("user_data".into());
+        result.orphan_status = "user_files".into();
+        result.evidence.push(Evidence {
+            kind: "personal_location".into(),
+            description: "This personal folder is scanned for review. Its contents are not application leftovers or cleanup candidates.".into(),
+            strength: "strong".into(),
+        });
+    }
     result
+}
+
+fn is_personal_scan_target(root: &str, path: &Path) -> bool {
+    match root {
+        "Documents" | "Downloads" | "OtherDownloads" | "OtherTemp" | "Public" | "Desktop" | "Pictures" | "Music" | "Videos" | "SavedGames" => true,
+        "UserProfile" => path.file_name().is_none_or(|name| !known_locations::USER_PROFILE_DEVELOPER_FOLDERS
+            .iter().any(|folder| folder.eq_ignore_ascii_case(&name.to_string_lossy()))),
+        _ => false,
+    }
 }
 
 /// Compares application records across scans while tolerating registry-key or
@@ -1009,7 +1131,7 @@ pub fn same_application(left: &Application, right: &Application) -> bool {
 /// Carries forward a previously observed owner only when the same resource remains
 /// and the current app inventory has no matching installation. It makes no safety claim.
 pub fn apply_history(result: &mut DirectoryResult, current: &Inventory, previous: &Inventory, previous_result: Option<&DirectoryResult>) {
-    if result.owner.is_some() || !current.warnings.is_empty() || !previous.warnings.is_empty() {
+    if result.location_class.as_deref() == Some("user_data") || result.owner.is_some() || !current.warnings.is_empty() || !previous.warnings.is_empty() {
         return;
     }
     let Some(previous_result) = previous_result else { return; };
@@ -1212,10 +1334,12 @@ pub struct ScanTarget {
     pub parent_path: Option<PathBuf>,
     /// False for nested targets whose bytes are already counted by their parent.
     pub count_bytes: bool,
+    /// Measure files directly in this folder; other roots cover its subfolders.
+    pub loose_only: bool,
 }
 
 fn measure_target(target: &ScanTarget, apps: &[Application], cancel: &AtomicBool) -> Option<DirectoryResult> {
-    let stats = inspect_directory(&target.path, cancel);
+    let stats = inspect_directory_inner(&target.path, cancel, target.loose_only);
     if cancel.load(Ordering::Relaxed) { return None; }
     let mut result = classify_directory(&target.path, &target.root, apps);
     result.parent_path = target.parent_path.as_ref().map(|parent| parent.to_string_lossy().into_owned());
@@ -1279,10 +1403,32 @@ fn child_directories(path: &Path, summary: &mut ScanSummary) -> Vec<PathBuf> {
 
 /// Enumerates the directories a scan in `mode` measures.
 pub fn collect_targets(apps: &[Application], mode: ScanMode, excluded_paths: &[PathBuf], summary: &mut ScanSummary, cancel: &AtomicBool) -> Vec<ScanTarget> {
-    let (roots, warnings, expected_roots) = scan_roots(mode);
+    let (roots, warnings, expected_roots) = scan_roots_with_apps(mode, apps);
     summary.warnings.extend(warnings);
+    collect_targets_in_roots(&roots, expected_roots, apps, excluded_paths, summary, cancel)
+}
+
+fn profile_targets(path: &Path, explicit_paths: &[&Path], excluded_paths: &[PathBuf], summary: &mut ScanSummary, targets: &mut Vec<ScanTarget>) {
+    if is_excluded(path, excluded_paths) { return; }
+    let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_default();
+    if name.eq_ignore_ascii_case("AppData") { return; }
+    let overlaps = |left: &Path, right: &Path| references::path_is_within(&left.to_string_lossy(), &right.to_string_lossy());
+    if explicit_paths.iter().any(|known| overlaps(path, known)) { return; }
+    if explicit_paths.iter().any(|known| overlaps(known, path)) {
+        targets.push(ScanTarget { path: path.to_path_buf(), root: "UserProfile".into(), parent_path: None, count_bytes: true, loose_only: true });
+        for child in child_directories(path, summary) {
+            profile_targets(&child, explicit_paths, excluded_paths, summary, targets);
+        }
+    } else {
+        targets.push(ScanTarget { path: path.to_path_buf(), root: "UserProfile".into(), parent_path: None, count_bytes: true, loose_only: false });
+    }
+}
+
+fn collect_targets_in_roots(roots: &[ScanRoot], expected_roots: usize, apps: &[Application], excluded_paths: &[PathBuf], summary: &mut ScanSummary, cancel: &AtomicBool) -> Vec<ScanTarget> {
     let mut targets = Vec::new();
     let mut enumerated = 0usize;
+    let explicit_paths: Vec<&Path> = roots.iter().filter(|root| root.label != "UserProfile")
+        .map(|root| root.path.as_path()).collect();
     for root in roots {
         if cancel.load(Ordering::Relaxed) { break; }
         let label = root.label.clone();
@@ -1293,26 +1439,46 @@ pub fn collect_targets(apps: &[Application], mode: ScanMode, excluded_paths: &[P
         }
         enumerated += 1;
         summary.scanned_roots.push(format!("{label}: {}", root.path.display()));
+        if label == "RegisteredInstall" {
+            if !is_excluded(&root.path, excluded_paths) {
+                targets.push(ScanTarget { path: root.path.clone(), root: label, parent_path: None, count_bytes: true, loose_only: false });
+            }
+            continue;
+        }
+        if label == "UserProfile" {
+            targets.push(ScanTarget { path: root.path.clone(), root: label.clone(), parent_path: None, count_bytes: true, loose_only: true });
+        }
+        if is_personal_scan_target(&label, &root.path) && label != "UserProfile" {
+            // The root covers loose files and the entire tree. Child rows make forgotten
+            // folders individually visible without counting their bytes twice.
+            targets.push(ScanTarget { path: root.path.clone(), root: label.clone(), parent_path: None, count_bytes: true, loose_only: false });
+            for child in child_directories(&root.path, summary) {
+                if !is_excluded(&child, excluded_paths) {
+                    targets.push(ScanTarget { path: child, root: label.clone(), parent_path: Some(root.path.clone()), count_bytes: false, loose_only: false });
+                }
+            }
+            continue;
+        }
         for path in child_directories(&root.path, summary) {
             if is_excluded(&path, excluded_paths) { continue; }
             let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
             if label == "UserProfile" {
-                if known_locations::USER_PROFILE_DEVELOPER_FOLDERS.iter().any(|folder| folder.eq_ignore_ascii_case(&name)) {
-                    targets.push(ScanTarget { path, root: label.clone(), parent_path: None, count_bytes: true });
-                }
+                // Split a container such as OneDrive when a redirected known folder
+                // lives inside it, so its other children remain covered.
+                profile_targets(&path, &explicit_paths, excluded_paths, summary, &mut targets);
                 continue;
             }
             let structural_container = label == "Local" && ["Packages", "Programs"].iter().any(|container| name.eq_ignore_ascii_case(container));
             if structural_container {
                 for child in child_directories(&path, summary) {
                     if is_excluded(&child, excluded_paths) { continue; }
-                    targets.push(ScanTarget { path: child, root: label.clone(), parent_path: None, count_bytes: true });
+                    targets.push(ScanTarget { path: child, root: label.clone(), parent_path: None, count_bytes: true, loose_only: false });
                 }
             } else {
                 let nested = nested_product_targets(&path, &label, apps);
-                targets.push(ScanTarget { path: path.clone(), root: label.clone(), parent_path: None, count_bytes: true });
+                targets.push(ScanTarget { path: path.clone(), root: label.clone(), parent_path: None, count_bytes: true, loose_only: false });
                 for child in nested {
-                    targets.push(ScanTarget { path: child, root: label.clone(), parent_path: Some(path.clone()), count_bytes: false });
+                    targets.push(ScanTarget { path: child, root: label.clone(), parent_path: Some(path.clone()), count_bytes: false, loose_only: false });
                 }
             }
         }
@@ -1713,6 +1879,80 @@ mod tests {
     }
 
     #[test]
+    fn conventional_drive_discovery_is_bounded_and_install_roots_do_not_overlap() {
+        let tree = temp_tree("discovery");
+        let drive = tree.join("Drive");
+        for path in [drive.join("Downloads"), drive.join("Mods").join("Downloads"), drive.join("temp"), drive.join("Program Files"),
+            drive.join("Windows").join("Downloads"), drive.join("Games").join("Example"),
+            drive.join("Downloads").join("Portable")]
+        {
+            fs::create_dir_all(path).unwrap();
+        }
+        let mut roots = discover_conventional_roots(&[drive.clone()]);
+        assert!(roots.iter().any(|root| root.path == drive.join("Downloads") && root.label == "OtherDownloads"));
+        assert!(roots.iter().any(|root| root.path == drive.join("Mods").join("Downloads")));
+        assert!(roots.iter().any(|root| root.path == drive.join("temp") && root.label == "OtherTemp"));
+        assert!(roots.iter().any(|root| root.path == drive.join("Program Files") && root.label == "ProgramFiles"));
+        assert!(!roots.iter().any(|root| root.path == drive.join("Windows").join("Downloads")));
+        let apps = [
+            Application { install_location: Some(drive.join("Games").join("Example").to_string_lossy().into_owned()), ..Default::default() },
+            Application { install_location: Some(drive.join("Downloads").join("Portable").to_string_lossy().into_owned()), ..Default::default() },
+            Application { install_location: Some(drive.join("Games").to_string_lossy().into_owned()), ..Default::default() },
+        ];
+        assert_eq!(add_registered_install_roots(&mut roots, &[drive.clone()], &apps), 1);
+        assert!(roots.iter().any(|root| root.path == drive.join("Games").join("Example") && root.label == "RegisteredInstall"));
+        let downloads = classify_directory(&drive.join("Mods").join("Downloads"), "OtherDownloads", &[]);
+        assert_eq!(downloads.orphan_status, "user_files");
+        assert_eq!(downloads.location_class.as_deref(), Some("user_data"));
+        fs::remove_dir_all(tree).unwrap();
+    }
+
+    #[test]
+    fn deep_personal_roots_cover_downloads_and_profile_without_appdata_overlap() {
+        let tree = temp_tree("personal-roots");
+        let profile = tree.join("Profile");
+        let downloads = profile.join("Downloads");
+        let documents = profile.join("OneDrive").join("Documents");
+        let app_data = profile.join("AppData").join("Local");
+        for path in [&downloads, &downloads.join("Old installer"), &documents, &documents.join("Notes"),
+            &profile.join("Projects"), &profile.join(".cargo"), &profile.join("OneDrive").join("Other"), &app_data.join("App")]
+        {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(profile.join("at-home.txt"), b"home").unwrap();
+        fs::write(profile.join("OneDrive").join("at-root.txt"), b"cloud").unwrap();
+        fs::write(downloads.join("forgotten.zip"), b"loose").unwrap();
+        fs::write(downloads.join("Old installer").join("setup.exe"), b"nested").unwrap();
+        let roots = vec![
+            ScanRoot { label: "Local".into(), path: app_data.clone() },
+            ScanRoot { label: "Documents".into(), path: documents.clone() },
+            ScanRoot { label: "Downloads".into(), path: downloads.clone() },
+            ScanRoot { label: "UserProfile".into(), path: profile.clone() },
+        ];
+        let mut summary = ScanSummary::default();
+        let targets = collect_targets_in_roots(&roots, roots.len(), &[], &[], &mut summary, &AtomicBool::new(false));
+        assert!(summary.complete);
+        assert!(targets.iter().any(|target| target.path == downloads && target.count_bytes));
+        assert!(targets.iter().any(|target| target.path == downloads.join("Old installer") && !target.count_bytes));
+        assert!(targets.iter().any(|target| target.path == documents.join("Notes")));
+        assert!(targets.iter().any(|target| target.path == profile.join("Projects")));
+        assert!(targets.iter().any(|target| target.path == profile.join("OneDrive").join("Other")));
+        assert!(targets.iter().any(|target| target.path == profile && target.loose_only));
+        assert!(targets.iter().any(|target| target.path == profile.join("OneDrive") && target.loose_only));
+        assert!(targets.iter().any(|target| target.path == profile.join(".cargo")));
+        assert!(!targets.iter().any(|target| target.path == profile.join("AppData")));
+        assert_eq!(inspect_directory_inner(&profile, &AtomicBool::new(false), true).size, 4);
+        assert_eq!(inspect_directory_inner(&profile.join("OneDrive"), &AtomicBool::new(false), true).size, 5);
+        let stats = inspect_directory(&downloads, &AtomicBool::new(false));
+        assert_eq!(stats.size, 11);
+        assert_eq!(stats.files, 2);
+        let result = classify_directory(&downloads, "Downloads", &[]);
+        assert_eq!(result.location_class.as_deref(), Some("user_data"));
+        assert_eq!(result.orphan_status, "user_files");
+        fs::remove_dir_all(tree).unwrap();
+    }
+
+    #[test]
     fn inspection_profiles_children_without_reading_contents() {
         let root = temp_tree("inspect").join("OldApp");
         fs::create_dir_all(root.join("Cache").join("deep")).unwrap();
@@ -1739,7 +1979,7 @@ mod tests {
             let path = base.join(format!("App{index}"));
             fs::create_dir_all(&path).unwrap();
             fs::write(path.join("f.txt"), vec![1u8; index + 1]).unwrap();
-            ScanTarget { path, root: "Roaming".into(), parent_path: None, count_bytes: true }
+            ScanTarget { path, root: "Roaming".into(), parent_path: None, count_bytes: true, loose_only: false }
         }).collect::<Vec<_>>();
         let mut summary = ScanSummary::default();
         let mut seen = Vec::new();

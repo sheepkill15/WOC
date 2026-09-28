@@ -262,7 +262,7 @@ pub fn build(scan: &SavedScan, rules: &[IgnoreRule], quarantined: &[String], new
     for result in &scan.results {
         if quarantined.iter().any(|path| path_is_within(&result.path, path)) { quarantined_paths += 1; continue; }
         if rules.path_rule(&result.path).is_some() { ignored_paths += 1; continue; }
-        if matches!(result.location_class.as_deref(), Some("system" | "shared_runtime")) { continue; }
+        if matches!(result.location_class.as_deref(), Some("system" | "shared_runtime" | "user_data")) { continue; }
         // Nested results are only candidates when their parent is not already one.
         let name = owner_name(result);
         let key = name.as_deref().map(normalize_name).filter(|key| !key.is_empty());
@@ -424,5 +424,16 @@ mod tests {
         let group = &report.groups[0];
         assert_eq!(group.total_bytes, 500, "quarantined content no longer counts");
         assert!(group.items[0].content.iter().all(|content| content.name != "Cache"));
+    }
+
+    #[test]
+    fn personal_folders_never_become_cleanup_candidates() {
+        let mut personal = result(r"C:\Users\Test\Downloads\Old installer", "probable_orphan", Some("Old installer"), 400 * 1024 * 1024);
+        personal.root = "Downloads".into();
+        personal.location_class = Some("user_data".into());
+        personal.orphan_status = "user_files".into();
+        personal.evidence.push(Evidence { kind: "personal_location".into(), ..Default::default() });
+        personal.assessment = cleaner_core::assess(&personal, 0);
+        assert!(build(&scan(vec![personal]), &[], &[], &HashSet::new()).groups.is_empty());
     }
 }

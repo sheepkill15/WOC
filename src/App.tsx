@@ -48,25 +48,25 @@ export default function App() {
   const clearFocus = useCallback(() => setFocusPath(null), []);
 
   const deadCount = references?.references.filter(reference => reference.status === "dead").length ?? 0;
-  const highGroups = candidates?.groups.filter(group => group.priority === "high").length ?? 0;
+  const reviewGroups = candidates?.groups.filter(group => group.priority !== "info").length ?? 0;
   const nav: { section?: string; route: Route; label: string; icon: string; badge?: string | number; tone?: string }[] = [
     { route: "overview", label: "Overview", icon: "overview" },
-    { route: "cleanup", label: "Cleanup", icon: "cleanup", badge: candidates?.recommendedBytes ? formatBytes(candidates.recommendedBytes) : highGroups || undefined, tone: "accent" },
+    { route: "cleanup", label: "Cleanup", icon: "cleanup", badge: candidates?.recommendedBytes ? formatBytes(candidates.recommendedBytes) : reviewGroups || undefined, tone: candidates?.recommendedBytes ? "accent" : undefined },
     { route: "uninstalled", label: "Uninstalled apps", icon: "uninstalled", badge: removed?.applications.length || undefined, tone: "warn" },
-    { section: "Explore", route: "inventory", label: "All folders", icon: "folders", badge: results.length || undefined },
     { route: "references", label: "References", icon: "references", badge: deadCount || undefined, tone: deadCount ? "warn" : undefined },
+    { route: "quarantine", label: "Quarantine", icon: "quarantine", badge: quarantine?.items.length || undefined },
+    { section: "Browse", route: "inventory", label: "All folders", icon: "folders", badge: results.length || undefined },
     { route: "apps", label: "Installed apps", icon: "apps", badge: apps.length || undefined },
-    { section: "Safety", route: "quarantine", label: "Quarantine", icon: "quarantine", badge: quarantine?.items.length || undefined },
-    { route: "rules", label: "Ignore rules", icon: "rules", badge: rules.length || undefined },
-    { section: "Tools", route: "analyzer", label: "Folder analyzer", icon: "analyzer" },
+    { route: "analyzer", label: "Folder analyzer", icon: "analyzer" },
+    { section: "Preferences", route: "rules", label: "Ignore rules", icon: "rules", badge: rules.length || undefined },
     { route: "settings", label: "Settings", icon: "settings" },
   ];
 
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-mark"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></svg></div>
-        <div><strong>Orphan Cleaner</strong><span>Ownership-aware cleanup</span></div>
+        <div className="brand-mark"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="8" /><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></svg></div>
+        <div><strong>Orphan Cleaner</strong></div>
       </div>
       <nav className="nav">
         {nav.map(item => <div key={item.route}>
@@ -88,12 +88,12 @@ export default function App() {
           <div className="scan-card-head"><span className={`status-dot ${connected ? "on" : backend === "connecting" ? "wait" : "off"}`} />
             <strong>{connected ? (backend === "agent" ? "Local agent" : "Ready") : backend === "connecting" ? "Connecting…" : "Backend offline"}</strong></div>
           <small>{savedAt ? `Last scan ${formatAge(savedAt)}${summary?.mode ? ` · ${summary.mode}` : ""}` : "No saved scan yet"}</small>
-          <div className="split-button">
-            <button className="primary" disabled={!connected} onClick={() => void cleaner.startScan()}><Icon name="refresh" size={14} /> {savedAt ? "Scan again" : "Start scan"}</button>
-            <button className="primary caret" disabled={!connected} aria-label="Choose scan mode" onClick={() => setModeMenu(value => !value)}><Icon name="chevron" size={14} /></button>
+          <div className={`split-button ${savedAt ? "quiet" : ""}`}>
+            <button className={savedAt ? "secondary" : "primary"} disabled={!connected} onClick={() => void cleaner.startScan()}><Icon name="refresh" size={14} /> {savedAt ? "Scan again" : "Start scan"}</button>
+            <button className={`${savedAt ? "secondary" : "primary"} caret`} disabled={!connected} aria-label="Choose scan mode" onClick={() => setModeMenu(value => !value)}><Icon name="chevron" size={14} /></button>
             {modeMenu && <div className="mode-menu" onMouseLeave={() => setModeMenu(false)}>
-              <button onClick={() => { setModeMenu(false); void cleaner.startScan("quick"); }}><strong>Quick scan</strong><span>AppData, ProgramData, references</span></button>
-              <button onClick={() => { setModeMenu(false); void cleaner.startScan("deep"); }}><strong>Deep scan</strong><span>+ Program Files, dev caches, executables</span></button>
+              <button onClick={() => { setModeMenu(false); void cleaner.startScan("quick"); }}><strong>Quick scan</strong><span>AppData, ProgramData, Downloads, references</span></button>
+              <button onClick={() => { setModeMenu(false); void cleaner.startScan("deep"); }}><strong>Deep scan</strong><span>+ personal folders, other drives, Program Files</span></button>
             </div>}
           </div>
         </>}

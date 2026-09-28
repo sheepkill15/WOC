@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useCleaner } from "../store";
 import { baseName, formatBytes, formatCount, formatDate } from "../format";
 import type { QuarantineItem } from "../types";
-import { Badge, Empty, Icon, Modal, Notice, PageHeader, Section, Stat } from "../ui";
+import { Badge, Empty, Icon, Modal, Notice, PageHeader, Section } from "../ui";
 
 export function Quarantine({ navigate }: { navigate: (route: "settings") => void }) {
   const { quarantine, refreshQuarantine, restore, purge, openPath, backend } = useCleaner();
@@ -22,13 +22,12 @@ export function Quarantine({ navigate }: { navigate: (route: "settings") => void
   }
 
   return <div className="page">
-    <PageHeader eyebrow="Recoverable" title="Quarantine" description="Cleaned items wait here, unchanged, until you restore or permanently delete them."
+    <PageHeader title="Quarantine" description="Everything you clean waits here, unchanged. Restore anything you miss. The disk space is only freed once items are deleted permanently."
       actions={items.length > 0 && <button className="ghost danger-text" disabled={busy} onClick={() => setConfirm(items)}><Icon name="trash" size={15} /> Delete all permanently</button>} />
-    <div className="stats three">
-      <Stat label="Items" value={items.length.toLocaleString()} />
-      <Stat label="Space held" value={formatBytes(quarantine?.totalBytes ?? 0)} hint="Freed only after permanent deletion" />
-      <Stat label="Retention" value={quarantine ? (quarantine.retentionDays ? `${quarantine.retentionDays} days` : "Manual") : "—"} hint={<button className="link" onClick={() => navigate("settings")}>Change</button>} />
-    </div>
+    {quarantine && <p className="scan-meta page-meta">
+      <span><b>{formatCount(items.length, "item")}</b> holding <b>{formatBytes(quarantine.totalBytes)}</b></span>
+      <span>{quarantine.retentionDays ? <>Deleted automatically after <b>{quarantine.retentionDays} days</b></> : "Kept until you delete them"} · <button className="link" onClick={() => navigate("settings")}>Change</button></span>
+    </p>}
     {quarantine && quarantine.expiredPurged > 0 && <Notice>{formatCount(quarantine.expiredPurged, "expired item")} were permanently deleted according to the retention setting.</Notice>}
     <Section title="In quarantine">
       {items.length === 0 ? <Empty icon="quarantine" title="Quarantine is empty">Items you clean are moved here first, so every cleanup can be undone.</Empty>

@@ -26,12 +26,11 @@ export function References() {
   }
 
   return <div className="page page-wide">
-    <PageHeader eyebrow="Startup · tasks · services · shortcuts · handlers" title="System references"
-      description="Places where Windows launches or registers programs. A reference whose program is missing points to software that was removed — and often to data it left behind." />
+    <PageHeader title="References"
+      description="Startup entries, scheduled tasks, services and shortcuts that point to a program. Tick dead shortcuts to move them to quarantine; other entries show where to remove them yourself." />
     {!references && <Empty icon="references" title="No references collected yet">References are collected during each scan.</Empty>}
     {references && <>
       {references.warnings.map((warning, index) => <Notice key={index} tone="warn">{warning}</Notice>)}
-      <Notice>Dead Start Menu and Startup shortcuts can be moved to quarantine. Registry entries, services and tasks are shown with their exact location so you can remove them in their own tools; this version does not edit the registry.</Notice>
       <div className="toolbar">
         <div className="tabs">
           {([["dead", `Missing target`, deadCount], ["ok", "Working", list.filter(reference => reference.status === "ok").length], ["all", "All", list.length]] as const).map(([key, label, count]) =>
@@ -66,9 +65,10 @@ export function References() {
         </table>
         {visible.length === 0 && <Empty icon="check" title={status === "dead" ? "No dead references" : "Nothing matches"}>{status === "dead" ? "Every startup entry, task, service and shortcut points to an existing program." : "Try another filter."}</Empty>}
       </div>
-      <div className={`selection-bar ${selected.size ? "visible" : ""}`}>
-        <div><strong>{formatCount(selected.size, "shortcut")} selected</strong><span>Dead shortcuts are moved to quarantine</span></div>
-        <button className="ghost" onClick={() => setSelected(new Set())}>Clear</button>
+      <div className={`selection-bar ${selected.size || (status === "dead" && visible.some(reference => reference.fileBacked)) ? "visible" : ""} ${selected.size ? "" : "idle"}`}>
+        {selected.size ? <div><strong>{formatCount(selected.size, "shortcut")} selected</strong><span>They will be moved to quarantine, where you can restore them.</span></div>
+          : <div><strong>Tick the dead shortcuts you want removed</strong><span>Registry entries, services and tasks can't be removed here; copy their location and remove them in their own tool.</span></div>}
+        {selected.size > 0 && <button className="ghost" onClick={() => setSelected(new Set())}>Clear</button>}
         <button className="primary" disabled={!selected.size} onClick={() => setDialog([...selected])}>Review &amp; clean</button>
       </div>
       {dialog && <CleanupDialog paths={dialog} onClose={() => setDialog(null)} onDone={() => setSelected(new Set())} />}

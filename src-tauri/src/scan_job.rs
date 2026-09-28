@@ -155,6 +155,7 @@ pub fn post_uninstall(local_data_dir: &Path, cancel: &AtomicBool) -> Result<Post
                 root: directory.root.clone(),
                 parent_path: previous.parent_path.as_ref().map(PathBuf::from),
                 count_bytes: previous.parent_path.is_none(),
+                loose_only: false,
             })
         })
         .collect();

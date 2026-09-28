@@ -63,6 +63,7 @@ function GroupCard({ group, selected, setSelected, expanded, onToggle }: {
       <span className={`chevron ${expanded ? "open" : ""}`}><Icon name="chevron" size={16} /></span>
     </header>
     {expanded && <div className="group-body">
+      <p className="group-hint">{selectablePaths.length === 0 ? "Shown for information. Nothing here can be selected." : "Why it's listed:"}</p>
       <ReasonList reasons={group.reasons} />
       {group.items.map(item => {
         const wholeSelected = selected.has(item.path);
@@ -108,7 +109,7 @@ function GroupCard({ group, selected, setSelected, expanded, onToggle }: {
 }
 
 export function Cleanup() {
-  const { candidates, rules, removeRule, backend, running } = useCleaner();
+  const { candidates, rules, removeRule, backend, running, quarantine } = useCleaner();
   const [selected, setSelectedState] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dialogPaths, setDialogPaths] = useState<string[] | null>(null);
@@ -138,17 +139,19 @@ export function Cleanup() {
   const setSelected = (updater: (previous: Set<string>) => Set<string>) => setSelectedState(updater);
 
   if (!candidates || candidates.scanAtUnix === null) {
-    return <div className="page"><PageHeader title="Cleanup" description="Grouped cleanup candidates with evidence, safety and your decisions." />
-      <Empty icon="cleanup" title="No saved scan yet">Run a complete scan first. Candidates are built from saved scans so they can be compared over time.</Empty></div>;
+    return <div className="page"><PageHeader title="Cleanup" description="Folders that were left behind or can be recreated, grouped by application." />
+      <Empty icon="cleanup" title="No saved scan yet">Run a scan first (button at the bottom left). Cleanup candidates are built from the saved scan.</Empty></div>;
   }
 
   return <div className="page with-selection-bar">
-    <PageHeader eyebrow="Choose what goes" title="Cleanup"
-      description="High-confidence groups have strong orphan evidence. Recommended selections include only regenerable data; everything else waits for your decision." />
+    <PageHeader title="Cleanup"
+      description={counts.high > 0
+        ? <>Recommended items are already ticked; they only contain data that can be recreated. Open a group to see why it's listed, tick anything else you don't need, then click <b>Review &amp; clean</b>.</>
+        : <>Nothing is certain enough to tick for you. Open a group to see why it's listed, tick what you know you don't need, then click <b>Review &amp; clean</b>.</>} />
     {running && <Notice>A scan is running. Candidates below are from the previous saved scan.</Notice>}
     <div className="filter-row">
       <div className="segmented">
-        {([["all", "All", candidates.groups.length], ["high", "High confidence", counts.high], ["review", "Review", counts.review], ["info", "For information", counts.info]] as const).map(([key, label, count]) =>
+        {([["all", "All", candidates.groups.length], ["high", "Recommended", counts.high], ["review", "Needs your decision", counts.review], ["info", "Information only", counts.info]] as const).map(([key, label, count]) =>
           <button key={key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>{label}<span>{count}</span></button>)}
       </div>
       <div className="filter-actions">
@@ -169,9 +172,10 @@ export function Cleanup() {
     </details>}
     {(candidates.ignoredPaths > 0 || candidates.quarantinedPaths > 0) && <p className="muted small">{candidates.ignoredPaths > 0 && `${formatCount(candidates.ignoredPaths, "folder")} hidden by ignore rules. `}{candidates.quarantinedPaths > 0 && `${formatCount(candidates.quarantinedPaths, "folder")} already in quarantine.`}</p>}
 
-    <div className={`selection-bar ${selected.size ? "visible" : ""}`}>
-      <div><strong>{formatCount(selected.size, "item")} selected</strong><span>{formatBytes(selectedBytes)} will be moved to quarantine after review</span></div>
-      <button className="ghost" onClick={() => setSelectedState(new Set())}>Clear selection</button>
+    <div className={`selection-bar visible ${selected.size ? "" : "idle"}`}>
+      {selected.size ? <div><strong>{formatCount(selected.size, "item")} selected · {formatBytes(selectedBytes)}</strong><span>Next you'll see a plan. Nothing moves until you confirm, and everything goes to quarantine{quarantine?.retentionDays ? ` for ${quarantine.retentionDays} days` : ""}.</span></div>
+        : <div><strong>Tick the folders you want to remove</strong><span>Selected items are moved to quarantine, not deleted, so you can restore them.</span></div>}
+      {selected.size > 0 && <button className="ghost" onClick={() => setSelectedState(new Set())}>Clear selection</button>}
       <button className="primary" disabled={!connected || running || selected.size === 0} onClick={() => setDialogPaths(selectedPaths)}>Review &amp; clean</button>
     </div>
     {dialogPaths && <CleanupDialog paths={dialogPaths} onClose={() => setDialogPaths(null)} onDone={outcome => {

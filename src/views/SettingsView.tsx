@@ -16,7 +16,7 @@ export function SettingsView({ theme, setTheme }: { theme: Theme; setTheme: (the
   const dirty = draft && settings && JSON.stringify(draft) !== JSON.stringify(settings);
 
   return <div className="page">
-    <PageHeader eyebrow="Preferences & data" title="Settings" />
+    <PageHeader title="Settings" />
     <Section title="Appearance">
       <div className="segmented">
         {(["system", "light", "dark"] as const).map(value => <button key={value} className={theme === value ? "active" : ""} onClick={() => setTheme(value)}>
@@ -28,7 +28,7 @@ export function SettingsView({ theme, setTheme }: { theme: Theme; setTheme: (the
       <div className="settings-grid">
         <label><span>Default scan mode</span>
           <select value={draft.defaultScanMode} onChange={event => setDraft({ ...draft, defaultScanMode: event.target.value as Settings["defaultScanMode"] })}>
-            <option value="quick">Quick — AppData and ProgramData</option><option value="deep">Deep — also Program Files and developer caches</option>
+            <option value="quick">Quick — AppData, ProgramData and Downloads</option><option value="deep">Deep — also personal folders, other drives and Program Files</option>
           </select></label>
         <label><span>Quarantine retention</span>
           <select value={draft.quarantineRetentionDays} onChange={event => setDraft({ ...draft, quarantineRetentionDays: Number(event.target.value) })}>

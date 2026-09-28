@@ -42,9 +42,9 @@ export function Stat({ label, value, hint, tone, onClick }: { label: string; val
   return onClick ? <button className="stat stat-button" onClick={onClick}>{content}</button> : <div className="stat">{content}</div>;
 }
 
-export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?: string; title: string; description?: ReactNode; actions?: ReactNode }) {
+export function PageHeader({ title, description, actions }: { title: string; description?: ReactNode; actions?: ReactNode }) {
   return <header className="page-header">
-    <div>{eyebrow && <div className="eyebrow">{eyebrow}</div>}<h1>{title}</h1>{description && <p>{description}</p>}</div>
+    <div><h1>{title}</h1>{description && <p>{description}</p>}</div>
     {actions && <div className="page-actions">{actions}</div>}
   </header>;
 }

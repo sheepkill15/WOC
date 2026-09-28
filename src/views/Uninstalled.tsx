@@ -18,20 +18,19 @@ export function Uninstalled({ openFolder }: { openFolder: (path: string) => void
   }
 
   return <div className="page">
-    <PageHeader eyebrow="Historical ownership" title="Uninstalled apps"
-      description="Applications that disappeared from the installed list while their data remained. Remembered ownership is the strongest evidence this app has."
+    <PageHeader title="Uninstalled apps"
+      description="Apps you uninstalled often leave data behind. Right after uninstalling something, run a post-uninstall check. To remove the leftovers, run a full scan; they then appear in Cleanup."
       actions={<button className="primary" disabled={!connected || checking || running} onClick={() => void check()}><Icon name="refresh" size={15} /> {checking ? "Checking…" : "Post-uninstall check"}</button>} />
 
     <Section title="Removed since the last scan" description="Compares the current installed-application list with the last saved scan. Fast: only previously linked folders are re-measured.">
       {removed?.warnings.map((warning, index) => <Notice key={index} tone="warn">{warning}</Notice>)}
       {removedApps.length === 0 ? <Empty icon="check" title="No newly removed applications">{removed?.baselineScanAtUnix ? `Compared with the scan from ${formatDate(removed.baselineScanAtUnix)}.` : "Run a full scan first to create a baseline."}</Empty>
-        : <div className="card-grid">{removedApps.map(item => <div className="app-card" key={item.application.id}>
-          <Badge tone="warn">Removed</Badge>
-          <strong>{item.application.name}</strong>
-          <small>{item.application.publisher ?? "Unknown publisher"}{item.application.version ? ` · ${item.application.version}` : ""}</small>
-          <div className="app-card-foot"><span>{formatBytes(item.remainingBytes)} last measured</span><span>{formatCount(item.directories.length, "folder")}</span></div>
+        : <ul className="app-rows">{removedApps.map(item => <li key={item.application.id}>
+          <div><strong>{item.application.name}</strong>
+            <small>{item.application.publisher ?? "Unknown publisher"}{item.application.version ? ` · ${item.application.version}` : ""}</small></div>
           <ul className="mini-paths">{item.directories.slice(0, 4).map(directory => <li key={directory.path}><button className="link" onClick={() => openFolder(directory.path)} title={directory.path}>{rootLabels[directory.root] ?? directory.root}\{baseName(directory.path)}</button><span>{formatBytes(directory.sizeBytes)}</span></li>)}</ul>
-        </div>)}</div>}
+          <div className="app-rows-size"><b>{formatBytes(item.remainingBytes)}</b><span>{formatCount(item.directories.length, "folder")}</span></div>
+        </li>)}</ul>}
     </Section>
 
     {postUninstall && <Section title="Post-uninstall check results" description={`Measured ${formatCount(postUninstall.results.length, "folder")} just now. These results are not saved as a scan; run a full scan to update the saved snapshot and the Cleanup page.`}>
@@ -48,13 +47,13 @@ export function Uninstalled({ openFolder }: { openFolder: (path: string) => void
 
     <Section title="Previously observed applications" description={history && history.completeScans >= 2 ? `Based on ${formatCount(history.completeScans, "retained scan")}. Historical ownership is evidence, not deletion approval.` : "Needs at least two complete scans. Scan again after uninstalling software."}>
       {!history || history.applications.length === 0 ? <Empty icon="uninstalled" title="No historical leftovers">No remaining folder is linked to an application that disappeared from the retained scans.</Empty>
-        : <div className="card-grid">{history.applications.map(item => <div className="app-card" key={item.application.id}>
-          <Badge tone={item.newlyMissing ? "warn" : "muted"}>{item.newlyMissing ? "New since previous scan" : "Previously detected"}</Badge>
-          <strong>{item.application.name}</strong>
-          <small>{item.application.publisher ?? "Unknown publisher"} · {item.lastSeenAtUnix ? `last seen installed ${formatDate(item.lastSeenAtUnix)}` : "installed before retained history"}</small>
-          <div className="app-card-foot"><span>{formatBytes(item.remainingBytes)} remaining</span><span>{formatCount(item.directories.length, "folder")}</span><span>{item.confidence === "probable" ? "Strong path history" : "Name-based history"}</span></div>
+        : <ul className="app-rows">{history.applications.map(item => <li key={item.application.id}>
+          <div><strong>{item.application.name}</strong>
+            <small>{item.application.publisher ?? "Unknown publisher"} · {item.lastSeenAtUnix ? `last seen ${formatDate(item.lastSeenAtUnix)}` : "installed before retained history"}</small>
+            {item.newlyMissing && <Badge tone="warn">New since previous scan</Badge>}</div>
           <ul className="mini-paths">{item.directories.slice(0, 4).map(directory => <li key={directory.path}><button className="link" onClick={() => openFolder(directory.path)} title={directory.path}>{rootLabels[directory.root] ?? directory.root}\{baseName(directory.path)}</button><span>{formatBytes(directory.sizeBytes)}</span></li>)}</ul>
-        </div>)}</div>}
+          <div className="app-rows-size"><b>{formatBytes(item.remainingBytes)}</b><span title={item.confidence === "probable" ? "Linked by the exact folder path in earlier scans" : "Linked by name only"}>{item.confidence === "probable" ? "Strong evidence" : "Name match"}</span></div>
+        </li>)}</ul>}
     </Section>
     {detail && <Modal wide title="Folder details" onClose={() => setDetail(null)}><DirectoryDetails result={detail} /></Modal>}
   </div>;

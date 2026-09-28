@@ -216,10 +216,15 @@ pub fn plan(app_local_data: &Path, scan: Option<&SavedScan>, paths: &[String], c
         match locate(scan, path) {
             None => block(&mut item, "This path was not shown in the latest scan, so it cannot be cleaned.".into()),
             Some(Located::Directory(result)) => {
+                if result.evidence.iter().any(|evidence| evidence.kind == "personal_location") {
+                    block(&mut item, "Personal folders shown for review are excluded from cleanup.".into());
+                    items.push(item);
+                    continue;
+                }
                 item.owner = result.owner.as_ref().map(|owner| owner.name.clone()).or_else(|| result.owner_hint.clone());
                 item.safety = result.assessment.deletion_safety.clone();
                 item.reason = format!("{} ({})", result.orphan_status, result.assessment.orphan_confidence);
-                if matches!(result.location_class.as_deref(), Some("system" | "shared_runtime")) {
+                if matches!(result.location_class.as_deref(), Some("system" | "shared_runtime" | "user_data")) {
                     block(&mut item, "Windows or a shared runtime manages this location.".into());
                 }
                 // Revalidate ownership against the current inventory.
@@ -247,6 +252,11 @@ pub fn plan(app_local_data: &Path, scan: Option<&SavedScan>, paths: &[String], c
                 }
             }
             Some(Located::Content(result, content_item)) => {
+                if result.evidence.iter().any(|evidence| evidence.kind == "personal_location") {
+                    block(&mut item, "Personal folders shown for review are excluded from cleanup.".into());
+                    items.push(item);
+                    continue;
+                }
                 item.item_kind = "content".into();
                 item.owner = result.owner.as_ref().map(|owner| owner.name.clone()).or_else(|| result.owner_hint.clone());
                 item.safety = content_item.safety.clone();
@@ -605,6 +615,25 @@ mod tests {
         assert!(plan.items[1..].iter().all(|item| item.status == "blocked"), "{:?}", plan.items);
         assert_eq!(plan.items[0].size_bytes, 10);
         assert!(plan.items[1..].iter().all(|item| item.status == "blocked"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn plan_blocks_personal_folder_and_its_content_even_from_a_saved_scan() {
+        let base = temp("personal");
+        let app_data = base.join("AppData");
+        let target = base.join("Downloads").join("Old installer");
+        fs::create_dir_all(target.join("Cache")).unwrap();
+        let mut scan = scan_with(&target);
+        let result = &mut scan.results[0];
+        result.root = "Downloads".into();
+        result.location_class = Some("user_data".into());
+        result.orphan_status = "user_files".into();
+        result.evidence.push(cleaner_core::Evidence { kind: "personal_location".into(), ..Default::default() });
+        result.assessment = cleaner_core::assess(result, 0);
+        let paths = [target.to_string_lossy().into_owned(), target.join("Cache").to_string_lossy().into_owned()];
+        let preview = plan(&app_data, Some(&scan), &paths, &[], &[]);
+        assert!(preview.items.iter().all(|item| item.status == "blocked"));
         fs::remove_dir_all(base).unwrap();
     }
 

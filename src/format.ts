@@ -53,15 +53,20 @@ export function shortPath(path: string): string {
 export const rootLabels: Record<string, string> = {
   Local: "AppData\\Local", Roaming: "AppData\\Roaming", LocalLow: "AppData\\LocalLow", ProgramData: "ProgramData",
   ProgramFiles: "Program Files", ProgramFilesX86: "Program Files (x86)", UserProfile: "User profile",
+  Documents: "Documents", Downloads: "Downloads", Desktop: "Desktop", Pictures: "Pictures",
+  Music: "Music", Videos: "Videos", SavedGames: "Saved Games",
+  Public: "Public files", OtherDownloads: "Other Downloads", OtherTemp: "Other temp", RegisteredInstall: "Registered install",
 };
 
 export function ownerLabel(result: DirectoryResult): string {
+  if (result.orphanStatus === "user_files" && !result.owner) return "Personal files";
   return result.owner?.name ?? result.ownerHint ?? (result.ownership === "shared" ? baseName(result.path) : "Unresolved");
 }
 
 export type Tone = "good" | "info" | "warn" | "danger" | "muted" | "accent";
 
 export function statusBadge(result: DirectoryResult): { label: string; tone: Tone; group: StatusGroup } {
+  if (result.orphanStatus === "user_files") return { label: "Personal files", tone: "info", group: "known" };
   if (result.orphanStatus === "probable_orphan") return { label: "Probable leftover", tone: "warn", group: "former" };
   if (result.evidence.some(item => item.kind === "newer_product_version_installed")) return { label: "Old version", tone: "warn", group: "former" };
   if (result.orphanStatus === "possibly_orphaned") return { label: "Possible leftover", tone: "warn", group: "former" };

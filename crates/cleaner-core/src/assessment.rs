@@ -54,6 +54,7 @@ pub fn assess(result: &DirectoryResult, now_unix: u64) -> Assessment {
     let location_class = result.location_class.as_deref().unwrap_or_default();
     let system_managed = location_class == "system" || result.ownership == "system";
     let shared_runtime = location_class == "shared_runtime" || result.ownership == "shared_runtime";
+    let personal_data = location_class == "user_data" && has(result, "personal_location");
     let ownership_class = if system_managed {
         "system"
     } else if shared_runtime || matches!(result.ownership.as_str(), "shared" | "product_family") || result.orphan_status == "associated_with_installed" {
@@ -149,7 +150,11 @@ pub fn assess(result: &DirectoryResult, now_unix: u64) -> Assessment {
         deletion_safety = PRESERVE;
         reasons.push(reason("negative", "Public game-save data lists save or settings paths here."));
     }
-    if system_managed || shared_runtime {
+    if personal_data {
+        deletion_safety = PRESERVE;
+        reclaimable_bytes = 0;
+        reasons.push(reason("negative", "This personal folder is included for review and is excluded from cleanup."));
+    } else if system_managed || shared_runtime {
         deletion_safety = PRESERVE;
         reasons.push(reason("negative", "Windows or a shared runtime manages this location; it is excluded from cleanup."));
     } else if ownership_class == "shared" && content::safety_rank(deletion_safety) < content::safety_rank(REVIEW) {
@@ -165,7 +170,7 @@ pub fn assess(result: &DirectoryResult, now_unix: u64) -> Assessment {
     // ---- Recommendation ----
     let strong_orphan = matches!(orphan_confidence, "confirmed" | "very_likely");
     let orphan = strong_orphan || orphan_confidence == "likely";
-    let recommended_action = if system_managed || shared_runtime {
+    let recommended_action = if personal_data || system_managed || shared_runtime {
         "keep"
     } else if strong_orphan && matches!(deletion_safety, SAFE | LIKELY_SAFE) {
         "clean"
@@ -265,6 +270,20 @@ mod tests {
         let assessment = assess(&result, 0);
         assert_eq!(assessment.ownership_class, "system");
         assert_eq!(assessment.deletion_safety, PRESERVE);
+        assert_eq!(assessment.recommended_action, "keep");
+    }
+
+    #[test]
+    fn personal_folders_are_preserved_even_when_they_contain_cache() {
+        let result = DirectoryResult {
+            location_class: Some("user_data".into()), orphan_status: "user_files".into(),
+            evidence: vec![evidence("personal_location")],
+            content: ContentProfile { items: vec![item("Cache", SAFE, 10)], ..Default::default() },
+            ..Default::default()
+        };
+        let assessment = assess(&result, 0);
+        assert_eq!(assessment.deletion_safety, PRESERVE);
+        assert_eq!(assessment.reclaimable_bytes, 0);
         assert_eq!(assessment.recommended_action, "keep");
     }
 }

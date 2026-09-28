@@ -28,7 +28,7 @@ export function Applications({ openFolder }: { openFolder: (path: string) => voi
     .sort((left, right) => sort === "name" ? left.name.localeCompare(right.name) : (linked.get(right.id)?.bytes ?? 0) - (linked.get(left.id)?.bytes ?? 0)), [apps, query, sort, linked]);
 
   return <div className="page page-wide">
-    <PageHeader eyebrow="Inventory" title="Installed apps" description="Everything registered for uninstall (per-user and machine-wide, 32- and 64-bit) plus current-user MSIX packages, with the data folders linked to each." />
+    <PageHeader title="Installed apps" description="For reference only: everything Windows lists as installed, with the data folders linked to each. Click a size to see those folders." />
     {inventoryWarnings.map((warning, index) => <Notice key={index} tone="warn">{warning}</Notice>)}
     <div className="toolbar">
       <div className="tabs"><button className="selected">Applications<span>{apps.length}</span></button></div>
