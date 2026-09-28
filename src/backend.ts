@@ -4,31 +4,21 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type BackendKind = "tauri" | "agent";
 export type BackendConnection = { kind: BackendKind; running: boolean };
 
-const isTauri = "__TAURI_INTERNALS__" in window;
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const agentUrl = (import.meta.env.VITE_CLEANER_AGENT_URL as string | undefined)?.replace(/\/$/, "")
   ?? "http://127.0.0.1:47653";
-const routes: Record<string, { path: string; method: "GET" | "POST" }> = {
-  installed_applications: { path: "/api/installed-applications", method: "GET" },
-  load_latest_scan: { path: "/api/latest-scan", method: "GET" },
-  load_history_report: { path: "/api/history-report", method: "GET" },
-  public_data_status: { path: "/api/public-data/status", method: "GET" },
-  update_public_data: { path: "/api/public-data/update", method: "POST" },
-  export_diagnostics: { path: "/api/diagnostics/export", method: "POST" },
-  start_scan: { path: "/api/scan/start", method: "POST" },
-  cancel_scan: { path: "/api/scan/cancel", method: "POST" },
-};
+const TRANSPORT_VERSION = 2;
 
 let activeKind: BackendKind | null = null;
 let eventSource: EventSource | null = null;
 let eventListenerCount = 0;
 
-async function agentRequest<T>(command: string): Promise<T> {
-  const route = routes[command];
-  if (!route) throw new Error(`Unsupported cleaner-agent command: ${command}`);
-  const response = await fetch(`${agentUrl}${route.path}`, {
-    method: route.method,
+async function agentRequest<T>(command: string, args?: unknown): Promise<T> {
+  const response = await fetch(`${agentUrl}/api/invoke/${encodeURIComponent(command)}`, {
+    method: "POST",
     cache: "no-store",
-    headers: route.method === "POST" ? { "X-Orphan-Cleaner-Client": "web-v1" } : undefined,
+    headers: { "X-Orphan-Cleaner-Client": "web-v2", "Content-Type": "application/json" },
+    body: JSON.stringify(args ?? {}),
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null;
@@ -40,7 +30,8 @@ async function agentRequest<T>(command: string): Promise<T> {
 export async function connectBackend(): Promise<BackendConnection> {
   if (isTauri) {
     activeKind = "tauri";
-    return { kind: "tauri", running: false };
+    const info = await invoke<{ running: boolean }>("backend", { command: "app_info", args: null });
+    return { kind: "tauri", running: Boolean(info.running) };
   }
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 1800);
@@ -48,9 +39,8 @@ export async function connectBackend(): Promise<BackendConnection> {
     const response = await fetch(`${agentUrl}/api/health`, { cache: "no-store", signal: controller.signal });
     if (!response.ok) throw new Error(`Cleaner agent returned HTTP ${response.status}`);
     const health = await response.json() as { service?: string; transportVersion?: number; running?: boolean };
-    if (health.service !== "windows-orphan-cleaner-agent" || health.transportVersion !== 1) {
-      throw new Error("An incompatible service is using the cleaner-agent address");
-    }
+    if (health.service !== "windows-orphan-cleaner-agent") throw new Error("An unrelated service is using the cleaner-agent address");
+    if (health.transportVersion !== TRANSPORT_VERSION) throw new Error("The running cleaner agent is a different version. Restart it with `npm run agent`.");
     activeKind = "agent";
     return { kind: "agent", running: Boolean(health.running) };
   } finally {
@@ -58,32 +48,24 @@ export async function connectBackend(): Promise<BackendConnection> {
   }
 }
 
-export async function invokeBackend<T>(command: string): Promise<T> {
-  if (activeKind === "tauri") return await invoke<T>(command);
-  if (activeKind === "agent") return await agentRequest<T>(command);
+export async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (activeKind === "tauri") return await invoke<T>("backend", { command, args: args ?? null });
+  if (activeKind === "agent") return await agentRequest<T>(command, args);
   throw new Error("No Windows cleaner backend is connected");
 }
 
 export async function listenBackend<T>(eventName: string, callback: (payload: T) => void): Promise<UnlistenFn> {
-  if (activeKind === "tauri") {
-    return await listen<T>(eventName, event => callback(event.payload));
-  }
+  if (activeKind === "tauri") return await listen<T>(eventName, event => callback(event.payload));
   if (activeKind !== "agent") throw new Error("No Windows cleaner backend is connected");
   if (!eventSource) eventSource = new EventSource(`${agentUrl}/api/events`);
   const source = eventSource;
-  const handler = (event: Event) => {
-    const message = event as MessageEvent<string>;
-    callback(JSON.parse(message.data) as T);
-  };
+  const handler = (event: Event) => callback(JSON.parse((event as MessageEvent<string>).data) as T);
   source.addEventListener(eventName, handler);
   eventListenerCount++;
   return () => {
     source.removeEventListener(eventName, handler);
     eventListenerCount--;
-    if (eventListenerCount === 0 && eventSource === source) {
-      source.close();
-      eventSource = null;
-    }
+    if (eventListenerCount === 0 && eventSource === source) { source.close(); eventSource = null; }
   };
 }
 

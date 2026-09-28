@@ -1,7 +1,7 @@
 use cleaner_core::{Application, DirectoryResult, same_application};
 use serde::Serialize;
 
-use crate::storage::SavedScan;
+use crate::storage::{SavedScan, ScanInventory};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,12 +38,21 @@ fn has_historical_owner(result: &DirectoryResult) -> bool {
         && result.owner.is_some()
 }
 
-fn inventory_contains(scan: &SavedScan, application: &Application) -> bool {
+fn inventory_contains(scan: &ScanInventory, application: &Application) -> bool {
     scan.inventory.applications.iter().any(|candidate| same_application(candidate, application))
 }
 
+/// Builds the report from full saved scans (newest first).
+#[cfg(test)]
 pub fn build(scans: &[SavedScan]) -> HistoryReport {
     let Some(current) = scans.first() else { return HistoryReport::default(); };
+    let inventories = scans.iter().map(|scan| ScanInventory { captured_at_unix: scan.captured_at_unix, inventory: scan.inventory.clone() }).collect::<Vec<_>>();
+    build_from(current, &inventories)
+}
+
+/// Builds the report from the latest scan and the inventories of all retained
+/// scans (newest first, including the latest).
+pub fn build_from(current: &SavedScan, scans: &[ScanInventory]) -> HistoryReport {
     let mut grouped: Vec<(Application, Vec<&DirectoryResult>)> = Vec::new();
     for result in current.results.iter().filter(|result| has_historical_owner(result)) {
         let owner = result.owner.as_ref().expect("historical owner checked above");
@@ -97,6 +106,47 @@ pub fn build(scans: &[SavedScan]) -> HistoryReport {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedApplication {
+    pub application: Application,
+    pub remaining_bytes: u64,
+    pub directories: Vec<HistoricalDirectory>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedReport {
+    pub baseline_scan_at_unix: Option<u64>,
+    pub applications: Vec<RemovedApplication>,
+    pub warnings: Vec<String>,
+}
+
+/// Compares the current inventory with the latest saved scan and lists apps
+/// that disappeared, with their previously linked directories that still exist.
+pub fn detect_removed(latest: &SavedScan, current: &cleaner_core::Inventory, exists: impl Fn(&str) -> bool) -> RemovedReport {
+    let mut report = RemovedReport { baseline_scan_at_unix: Some(latest.captured_at_unix), ..Default::default() };
+    if !current.warnings.is_empty() || !latest.inventory.warnings.is_empty() {
+        report.warnings.push("The application inventory is incomplete, so removed applications cannot be identified reliably.".into());
+        return report;
+    }
+    for application in &latest.inventory.applications {
+        if current.applications.iter().any(|candidate| same_application(candidate, application)) { continue; }
+        let mut directories = latest.results.iter()
+            .filter(|result| result.owner.as_ref().is_some_and(|owner| same_application(owner, application)))
+            .filter(|result| result.orphan_status == "not_orphaned")
+            .filter(|result| exists(&result.path))
+            .map(|result| HistoricalDirectory { path: result.path.clone(), root: result.root.clone(), size_bytes: result.size_bytes, orphan_status: result.orphan_status.clone() })
+            .collect::<Vec<_>>();
+        if directories.is_empty() { continue; }
+        directories.sort_by(|left, right| right.size_bytes.cmp(&left.size_bytes));
+        let remaining_bytes = directories.iter().map(|directory| directory.size_bytes).sum();
+        report.applications.push(RemovedApplication { application: application.clone(), remaining_bytes, directories });
+    }
+    report.applications.sort_by(|left, right| right.remaining_bytes.cmp(&left.remaining_bytes));
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,9 +166,10 @@ mod tests {
             skipped_entries: 0, owner: Some(owner), owner_hint: None,
             ownership: "historical_confirmed".into(), orphan_status: "probable_orphan".into(),
             evidence: vec![Evidence { kind: "historical_owner".into(), description: "Previously linked".into(), strength: "strong".into() }],
+            ..Default::default()
         }).collect();
         SavedScan { captured_at_unix: time, inventory: Inventory { applications: installed, warnings: vec![] },
-            summary: ScanSummary::default(), results }
+            summary: ScanSummary::default(), results, references: Default::default() }
     }
 
     #[test]
@@ -161,7 +212,22 @@ mod tests {
             size_bytes: 10, file_count: 1, directory_count: 0, newest_modified_unix: None,
             skipped_entries: 0, owner: None, owner_hint: Some("Image-Line".into()),
             ownership: "known_location".into(), orphan_status: "possibly_orphaned".into(), evidence: vec![],
+            ..Default::default()
         });
         assert!(build(&[current]).applications.is_empty());
+    }
+
+    #[test]
+    fn removed_applications_list_existing_linked_directories() {
+        let application = app("old-key");
+        let mut latest = scan(100, vec![application.clone()], Some(application.clone()));
+        latest.results[0].orphan_status = "not_orphaned".into();
+        let current = Inventory { applications: vec![], warnings: vec![] };
+        let report = detect_removed(&latest, &current, |_| true);
+        assert_eq!(report.applications.len(), 1);
+        assert_eq!(report.applications[0].remaining_bytes, 4096);
+        assert!(detect_removed(&latest, &current, |_| false).applications.is_empty());
+        let incomplete = Inventory { applications: vec![], warnings: vec!["x".into()] };
+        assert!(detect_removed(&latest, &incomplete, |_| true).applications.is_empty());
     }
 }

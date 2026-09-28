@@ -39,6 +39,24 @@ fn redact_value(value: &mut Value, replacements: &[(String, &'static str)]) {
     }
 }
 
+pub const PRIVACY_NOTICE: &str = "Contains installed application names and versions, scanned directory paths with the names of their immediate subfolders, aggregate sizes, counts and file-extension totals, classifier evidence and assessments, executable version metadata (without file names), startup/task/service/shortcut references with their command lines, warnings, up to ten completed scans, and the last 200 application log lines. User-profile and app-local-data path prefixes are redacted. It contains no file contents and no individual file names.";
+
+/// Removes executable file names; version metadata remains for troubleshooting.
+fn strip_file_names(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(Value::Array(executables)) = fields.get_mut("executables") {
+                for executable in executables.iter_mut() {
+                    if let Some(object) = executable.as_object_mut() { object.remove("fileName"); }
+                }
+            }
+            fields.values_mut().for_each(strip_file_names);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_file_names),
+        _ => {}
+    }
+}
+
 fn build_bundle(scans: &[SavedScan], status: &PublicDataStatus, app_local_data: &Path) -> Result<Value, String> {
     let generated_at_unix = SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(|err| err.to_string())?.as_secs();
@@ -48,12 +66,14 @@ fn build_bundle(scans: &[SavedScan], status: &PublicDataStatus, app_local_data: 
         fields.remove("winapp2Etag");
     }
     let mut bundle = json!({
-        "formatVersion": 1,
+        "formatVersion": 2,
         "generatedAtUnix": generated_at_unix,
-        "privacyNotice": "Contains installed application names and versions, top-level and positively matched nested directory paths, aggregate sizes and counts, classifier evidence, warnings, and up to ten completed scans. User-profile and app-local-data path prefixes are redacted. It contains no file contents and no individual filenames.",
+        "privacyNotice": PRIVACY_NOTICE,
         "publicFolderData": public_data,
         "scans": scans,
+        "recentLog": crate::logging::tail(app_local_data, 200),
     });
+    strip_file_names(&mut bundle);
     let mut replacements = vec![(app_local_data.to_string_lossy().into_owned(), "%APP_LOCAL_DATA%")];
     if let Some(profile) = std::env::var_os("USERPROFILE") {
         replacements.push((profile.to_string_lossy().into_owned(), "%USERPROFILE%"));
@@ -111,7 +131,10 @@ mod tests {
                 size_bytes: 1, file_count: 1, directory_count: 0, newest_modified_unix: None,
                 skipped_entries: 0, owner: None, owner_hint: None, ownership: "unknown".into(),
                 orphan_status: "unknown".into(), evidence: vec![],
+                executables: vec![cleaner_core::ExecutableInfo { file_name: "secret.exe".into(), ..Default::default() }],
+                ..Default::default()
             }],
+            references: Default::default(),
         };
         let status = PublicDataStatus::default();
         let mut value = build_bundle(&[scan], &status, app_local).unwrap();
@@ -120,6 +143,7 @@ mod tests {
         assert!(!serialized.contains("Private Person"));
         assert!(serialized.contains("%USERPROFILE%"));
         assert!(!serialized.contains("ludusaviEtag"));
+        assert!(!serialized.contains("secret.exe"));
     }
 
     #[test]
@@ -132,7 +156,7 @@ mod tests {
         let second = export(&downloads, &app_local, &[], &status).unwrap();
         assert_ne!(first.path, second.path);
         let parsed: Value = serde_json::from_slice(&std::fs::read(&first.path).unwrap()).unwrap();
-        assert_eq!(parsed["formatVersion"], 1);
+        assert_eq!(parsed["formatVersion"], 2);
         assert_eq!(parsed["scans"].as_array().unwrap().len(), 0);
         std::fs::remove_dir_all(directory).unwrap();
     }

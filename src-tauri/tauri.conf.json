@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Windows Orphan Cleaner", "width": 1180, "height": 760, "minWidth": 900, "minHeight": 600 }],
+    "windows": [{ "title": "Windows Orphan Cleaner", "width": 1340, "height": 860, "minWidth": 900, "minHeight": 600 }],
     "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" }
   },
   "bundle": { "active": false }

@@ -1,0 +1,152 @@
+# Built-in application definitions.
+# Paths may name a data directory and at most one child folder below it.
+# Supported roots: %LOCALAPPDATA%, %APPDATA%, %LOCALAPPDATALOW%, %PROGRAMDATA%.
+# Types use the content categories from the specification (CACHE, LOG, CONFIGURATION, ...).
+- id: discord
+  vendor: discord
+  product: Discord
+  identifiers: { executables: [Discord.exe] }
+  paths:
+    - { path: "%APPDATA%\\discord", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\discord\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\discord\\Code Cache", type: CACHE }
+    - { path: "%APPDATA%\\discord\\GPUCache", type: SHADER_CACHE }
+    - { path: "%APPDATA%\\discord\\logs", type: LOG }
+    - { path: "%APPDATA%\\discord\\Crashpad", type: CRASH_DUMP }
+    - { path: "%APPDATA%\\discord\\Local Storage", type: SESSION_DATA }
+    - { path: "%LOCALAPPDATA%\\Discord", type: APPLICATION_BINARIES }
+    - { path: "%LOCALAPPDATA%\\Discord\\packages", type: UPDATE_CACHE }
+- id: slack
+  vendor: slack
+  product: Slack
+  identifiers: { executables: [slack.exe] }
+  paths:
+    - { path: "%APPDATA%\\Slack", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\Slack\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\Slack\\Code Cache", type: CACHE }
+    - { path: "%APPDATA%\\Slack\\GPUCache", type: SHADER_CACHE }
+    - { path: "%APPDATA%\\Slack\\logs", type: LOG }
+    - { path: "%APPDATA%\\Slack\\Service Worker", type: GENERATED_DATA }
+    - { path: "%LOCALAPPDATA%\\slack", type: APPLICATION_BINARIES }
+    - { path: "%LOCALAPPDATA%\\slack\\packages", type: UPDATE_CACHE }
+- id: spotify
+  vendor: spotify
+  product: Spotify
+  identifiers: { executables: [Spotify.exe] }
+  paths:
+    - { path: "%APPDATA%\\Spotify", type: APPLICATION_BINARIES }
+    - { path: "%APPDATA%\\Spotify\\Users", type: ACCOUNT_DATA }
+    - { path: "%LOCALAPPDATA%\\Spotify", type: CACHE }
+    - { path: "%LOCALAPPDATA%\\Spotify\\Storage", type: CACHE }
+    - { path: "%LOCALAPPDATA%\\Spotify\\Data", type: CACHE }
+- id: vscode
+  vendor: microsoft
+  product: Microsoft Visual Studio Code
+  identifiers: { executables: [Code.exe], names: [Visual Studio Code] }
+  paths:
+    - { path: "%APPDATA%\\Code", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\Code\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\Code\\CachedData", type: CACHE }
+    - { path: "%APPDATA%\\Code\\CachedExtensionVSIXs", type: DOWNLOADED_ASSET }
+    - { path: "%APPDATA%\\Code\\Code Cache", type: CACHE }
+    - { path: "%APPDATA%\\Code\\GPUCache", type: SHADER_CACHE }
+    - { path: "%APPDATA%\\Code\\logs", type: LOG }
+    - { path: "%APPDATA%\\Code\\User", type: CONFIGURATION }
+    - { path: "%APPDATA%\\Code\\Backups", type: PROJECT }
+- id: microsoft-teams-classic
+  vendor: microsoft
+  product: Microsoft Teams classic
+  identifiers: { executables: [Teams.exe], names: [Microsoft Teams, Teams Machine-Wide Installer] }
+  paths:
+    - { path: "%APPDATA%\\Microsoft Teams", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\Microsoft Teams\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\Microsoft Teams\\Code Cache", type: CACHE }
+    - { path: "%APPDATA%\\Microsoft Teams\\GPUCache", type: SHADER_CACHE }
+    - { path: "%APPDATA%\\Microsoft Teams\\logs", type: LOG }
+    - { path: "%APPDATA%\\Microsoft Teams\\Service Worker", type: GENERATED_DATA }
+    - { path: "%APPDATA%\\Microsoft Teams\\tmp", type: TEMPORARY }
+- id: zoom
+  vendor: zoom
+  product: Zoom
+  identifiers: { executables: [Zoom.exe], names: [Zoom Workplace] }
+  paths:
+    - { path: "%APPDATA%\\Zoom", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\Zoom\\bin", type: APPLICATION_BINARIES }
+    - { path: "%APPDATA%\\Zoom\\logs", type: LOG }
+    - { path: "%APPDATA%\\Zoom\\data", type: ACCOUNT_DATA }
+- id: obsidian
+  vendor: obsidian
+  product: Obsidian
+  identifiers: { executables: [Obsidian.exe] }
+  paths:
+    - { path: "%APPDATA%\\obsidian", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\obsidian\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\obsidian\\Code Cache", type: CACHE }
+    - { path: "%APPDATA%\\obsidian\\GPUCache", type: SHADER_CACHE }
+- id: notion
+  vendor: notion
+  product: Notion
+  identifiers: { executables: [Notion.exe] }
+  paths:
+    - { path: "%APPDATA%\\Notion", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\Notion\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\Notion\\Code Cache", type: CACHE }
+    - { path: "%APPDATA%\\Notion\\GPUCache", type: SHADER_CACHE }
+    - { path: "%APPDATA%\\Notion\\logs", type: LOG }
+    - { path: "%APPDATA%\\Notion\\Session Storage", type: SESSION_DATA }
+    - { path: "%APPDATA%\\Notion\\Partitions", type: APPLICATION_STATE }
+- id: steam
+  vendor: valve
+  product: Steam
+  identifiers: { executables: [steam.exe] }
+  paths:
+    - { path: "%LOCALAPPDATA%\\Steam", type: APPLICATION_STATE }
+    - { path: "%LOCALAPPDATA%\\Steam\\htmlcache", type: CACHE }
+- id: epic-games-launcher
+  vendor: epic games
+  product: Epic Games Launcher
+  identifiers: { executables: [EpicGamesLauncher.exe] }
+  paths:
+    - { path: "%LOCALAPPDATA%\\EpicGamesLauncher", type: APPLICATION_STATE }
+    - { path: "%LOCALAPPDATA%\\EpicGamesLauncher\\Saved", type: APPLICATION_STATE }
+    - { path: "%LOCALAPPDATA%\\EpicGamesLauncher\\Intermediate", type: GENERATED_DATA }
+- id: nvidia-shader-cache
+  vendor: nvidia
+  product: NVIDIA graphics driver
+  identifiers: { names: [NVIDIA Graphics Driver] }
+  paths:
+    - { path: "%LOCALAPPDATA%\\NVIDIA\\DXCache", type: SHADER_CACHE }
+    - { path: "%LOCALAPPDATA%\\NVIDIA\\GLCache", type: SHADER_CACHE }
+    - { path: "%LOCALAPPDATA%\\NVIDIA\\OptixCache", type: SHADER_CACHE }
+- id: jetbrains-toolbox
+  vendor: jetbrains
+  product: JetBrains Toolbox
+  identifiers: { executables: [jetbrains-toolbox.exe] }
+  paths:
+    - { path: "%LOCALAPPDATA%\\JetBrains\\Toolbox", type: APPLICATION_BINARIES }
+- id: figma
+  vendor: figma
+  product: Figma
+  identifiers: { executables: [Figma.exe] }
+  paths:
+    - { path: "%APPDATA%\\Figma", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\Figma\\DesktopProfile", type: ACCOUNT_DATA }
+    - { path: "%LOCALAPPDATA%\\Figma", type: APPLICATION_BINARIES }
+    - { path: "%LOCALAPPDATA%\\Figma\\packages", type: UPDATE_CACHE }
+- id: whatsapp
+  vendor: whatsapp
+  product: WhatsApp
+  identifiers: { executables: [WhatsApp.exe] }
+  paths:
+    - { path: "%APPDATA%\\WhatsApp", type: ACCOUNT_DATA }
+    - { path: "%APPDATA%\\WhatsApp\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\WhatsApp\\GPUCache", type: SHADER_CACHE }
+- id: postman
+  vendor: postman
+  product: Postman
+  identifiers: { executables: [Postman.exe] }
+  paths:
+    - { path: "%APPDATA%\\Postman", type: APPLICATION_STATE }
+    - { path: "%APPDATA%\\Postman\\Cache", type: CACHE }
+    - { path: "%APPDATA%\\Postman\\logs", type: LOG }
+    - { path: "%LOCALAPPDATA%\\Postman", type: APPLICATION_BINARIES }

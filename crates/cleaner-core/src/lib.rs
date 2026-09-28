@@ -11,12 +11,23 @@ use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_3
 use winreg::RegKey;
 use windows::core::GUID;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
-use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_Downloads, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_ProgramData, FOLDERID_RoamingAppData};
+use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_CommonPrograms, FOLDERID_CommonStartup, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Favorites, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_SavedGames, FOLDERID_Videos, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFilesX64, FOLDERID_ProgramFilesX86, FOLDERID_Programs, FOLDERID_RoamingAppData, FOLDERID_Startup};
 
 mod known_locations;
+pub mod assessment;
+pub mod content;
+pub mod definitions;
+pub mod executables;
 pub mod public_data;
+pub mod references;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+pub use assessment::{Assessment, Reason, assess};
+pub use content::{ContentItem, ContentProfile, ExtensionStat};
+pub use definitions::Definitions;
+pub use executables::ExecutableInfo;
+pub use references::{ReferenceInventory, SystemReference};
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Application {
     pub id: String,
@@ -30,7 +41,7 @@ pub struct Application {
     pub sources: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Inventory {
     pub applications: Vec<Application>,
@@ -47,7 +58,7 @@ struct AppxPackage {
     package_family_name: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Evidence {
     pub kind: String,
@@ -55,7 +66,7 @@ pub struct Evidence {
     pub strength: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectoryResult {
     pub path: String,
@@ -73,11 +84,33 @@ pub struct DirectoryResult {
     pub ownership: String,
     pub orphan_status: String,
     pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub oldest_modified_unix: Option<u64>,
+    #[serde(default)]
+    pub created_unix: Option<u64>,
+    /// Treatment class of a recognized location: app_data | system | shared_runtime | tool_cache | user_data.
+    #[serde(default)]
+    pub location_class: Option<String>,
+    #[serde(default)]
+    pub content: ContentProfile,
+    #[serde(default)]
+    pub executables: Vec<ExecutableInfo>,
+    #[serde(default)]
+    pub assessment: Assessment,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanSummary {
+    #[serde(default)]
+    pub mode: String,
+    /// True when every expected root was enumerated and the scan was not canceled.
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub started_at_unix: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
     pub directories: u64,
     pub bytes: u64,
     pub skipped_entries: u64,
@@ -90,7 +123,7 @@ pub fn normalize_name(value: &str) -> String {
     value.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
-fn product_name_without_version(name: &str) -> String {
+pub(crate) fn product_name_without_version(name: &str) -> String {
     let name = name.trim();
     let name = [" (User)", " (x64)", " (x86)"].iter()
         .find_map(|suffix| name.strip_suffix(suffix)).unwrap_or(name);
@@ -155,9 +188,14 @@ fn registry_applications() -> (Vec<Application>, Vec<String>) {
                 r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
                 KEY_READ | flag,
             );
-            let Ok(uninstall) = uninstall else {
-                warnings.push(format!("Could not read {hive_name} {view}-bit uninstall entries."));
-                continue;
+            let uninstall = match uninstall {
+                Ok(uninstall) => uninstall,
+                // A missing key simply means nothing is registered there (common for HKCU).
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    warnings.push(format!("Could not read {hive_name} {view}-bit uninstall entries."));
+                    continue;
+                }
             };
             for subkey in uninstall.enum_keys() {
                 let Ok(subkey) = subkey else {
@@ -205,7 +243,7 @@ fn registry_applications() -> (Vec<Application>, Vec<String>) {
 fn msix_applications() -> Result<Vec<Application>, String> {
     // This fixed, read-only command avoids loading or executing anything found during scanning.
     let script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); ConvertTo-Json -InputObject @(Get-AppxPackage | Select-Object Name,PublisherDisplayName,Version,InstallLocation,PackageFamilyName) -Depth 3 -Compress";
-    let output = Command::new("powershell.exe")
+    let output = Command::new(powershell_path())
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()
         .map_err(|err| format!("MSIX inventory could not start: {err}"))?;
@@ -224,6 +262,12 @@ fn msix_applications() -> Result<Vec<Application>, String> {
         package_family_name: Some(package.package_family_name),
         sources: vec!["Current-user MSIX/AppX package".into()],
     }).collect())
+}
+
+/// Absolute path to Windows PowerShell, so a same-named file next to the app is never run.
+pub fn powershell_path() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    root.join("System32").join("WindowsPowerShell").join("v1.0").join("powershell.exe")
 }
 
 pub fn installed_applications() -> Inventory {
@@ -321,7 +365,13 @@ fn nested_product_version(path: &Path, app: &Application) -> Option<Vec<u64>> {
     let product = normalize_name(&product_name_without_version(&app.name));
     let Some((child_product, child_version)) = path.file_name()
         .and_then(|name| versioned_name(&name.to_string_lossy())) else { return None; };
-    if product.len() < 4 || child_product != product {
+    // Registrations such as "JetBrains Rider 2024.1" repeat the publisher before the
+    // product; the version folder then names only the product ("Rider2024.1").
+    let without_publisher = product.strip_prefix(&normalize_name(publisher))
+        .or_else(|| product.strip_prefix(&vendor_name(publisher)))
+        .filter(|rest| rest.len() >= 4);
+    let matches = (product.len() >= 4 && child_product == product) || without_publisher == Some(child_product.as_str());
+    if !matches {
         return None;
     }
     Some(child_version)
@@ -480,15 +530,93 @@ pub fn downloads_path() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join("Downloads")))
 }
 
-fn scan_roots() -> (Vec<(String, PathBuf)>, Vec<String>) {
+pub fn user_profile_path() -> Option<PathBuf> {
+    known_folder_path(&FOLDERID_Profile)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+}
+
+/// Start Menu and Startup folders for the current user and all users.
+pub(crate) fn shortcut_directories() -> Vec<(&'static str, PathBuf, bool)> {
+    let mut directories = Vec::new();
+    for (kind, id, machine_wide) in [
+        ("startup_folder", &FOLDERID_Startup, false),
+        ("startup_folder", &FOLDERID_CommonStartup, true),
+        ("start_menu_shortcut", &FOLDERID_Programs, false),
+        ("start_menu_shortcut", &FOLDERID_CommonPrograms, true),
+    ] {
+        if let Some(path) = known_folder_path(id) {
+            directories.push((kind, path, machine_wide));
+        }
+    }
+    directories
+}
+
+/// Folders that hold the user's own files or define scan roots. Cleanup refuses
+/// these folders and any folder that contains one of them.
+pub fn protected_folders() -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = [
+        &FOLDERID_Profile, &FOLDERID_Documents, &FOLDERID_Desktop, &FOLDERID_Pictures, &FOLDERID_Music, &FOLDERID_Videos,
+        &FOLDERID_Downloads, &FOLDERID_SavedGames, &FOLDERID_Favorites, &FOLDERID_LocalAppData, &FOLDERID_RoamingAppData,
+        &FOLDERID_LocalAppDataLow, &FOLDERID_ProgramData, &FOLDERID_ProgramFilesX64, &FOLDERID_ProgramFilesX86,
+        &FOLDERID_Programs, &FOLDERID_CommonPrograms, &FOLDERID_Startup, &FOLDERID_CommonStartup,
+    ].into_iter().filter_map(known_folder_path).collect();
+    for variable in ["OneDrive", "OneDriveConsumer", "OneDriveCommercial", "SystemRoot", "USERPROFILE", "PUBLIC"] {
+        if let Some(value) = std::env::var_os(variable) {
+            folders.push(PathBuf::from(value));
+        }
+    }
+    folders.retain(|folder| folder.components().count() >= 2);
+    folders
+}
+
+/// Directories where `.lnk` files may be quarantined as dead shortcuts.
+pub fn shortcut_roots() -> Vec<PathBuf> {
+    shortcut_directories().into_iter().map(|(_, path, _)| path).collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanMode {
+    /// AppData and ProgramData (spec §29 quick scan).
+    #[default]
+    Quick,
+    /// Adds Program Files, developer folders in the user profile, and executable metadata.
+    Deep,
+}
+
+impl ScanMode {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Quick => "quick", Self::Deep => "deep" }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value { "quick" => Some(Self::Quick), "deep" => Some(Self::Deep), _ => None }
+    }
+}
+
+/// A scan root: label used for classification and the resolved folder.
+#[derive(Clone, Debug)]
+pub struct ScanRoot {
+    pub label: String,
+    pub path: PathBuf,
+}
+
+pub fn scan_roots(mode: ScanMode) -> (Vec<ScanRoot>, Vec<String>, usize) {
     let mut roots = Vec::new();
     let mut warnings = Vec::new();
-    for (label, id, fallback) in [
+    let mut entries: Vec<(&str, &GUID, &str)> = vec![
         ("Local", &FOLDERID_LocalAppData, "LOCALAPPDATA"),
         ("Roaming", &FOLDERID_RoamingAppData, "APPDATA"),
         ("LocalLow", &FOLDERID_LocalAppDataLow, ""),
         ("ProgramData", &FOLDERID_ProgramData, "PROGRAMDATA"),
-    ] {
+    ];
+    if mode == ScanMode::Deep {
+        entries.push(("ProgramFiles", &FOLDERID_ProgramFilesX64, "ProgramW6432"));
+        entries.push(("ProgramFilesX86", &FOLDERID_ProgramFilesX86, "ProgramFiles(x86)"));
+        entries.push(("UserProfile", &FOLDERID_Profile, "USERPROFILE"));
+    }
+    let expected = entries.len();
+    for (label, id, fallback) in entries {
         let known = known_folder_path(id);
         let path = known.or_else(|| {
             warnings.push(format!("Windows Known Folder lookup failed for {label}; using the environment fallback."));
@@ -499,70 +627,140 @@ fn scan_roots() -> (Vec<(String, PathBuf)>, Vec<String>) {
             }
         });
         match path {
-            Some(path) if path.is_dir() => roots.push((label.to_owned(), path)),
+            Some(path) if path.is_dir() => roots.push(ScanRoot { label: label.to_owned(), path }),
             _ => warnings.push(format!("{label} could not be scanned because its folder is unavailable.")),
         }
     }
     let mut seen = HashSet::new();
-    roots.retain(|(_, path)| seen.insert(path.to_string_lossy().to_lowercase()));
-    (roots, warnings)
+    let before = roots.len();
+    roots.retain(|root| seen.insert(root.path.to_string_lossy().to_lowercase()));
+    // Duplicate roots (e.g. identical Program Files folders on 32-bit systems) are not missing coverage.
+    let expected = expected - (before - roots.len());
+    (roots, warnings, expected)
 }
 
 #[cfg(windows)]
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     metadata.file_attributes() & 0x400 != 0
 }
 
 #[cfg(not(windows))]
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
 }
 
-fn inspect_directory(path: &Path, cancel: &AtomicBool) -> (u64, u64, u64, Option<u64>, u64) {
-    let mut size = 0u64;
-    let mut files = 0u64;
-    let mut directories = 0u64;
-    let mut newest = None::<u64>;
-    let mut skipped = 0u64;
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(current) = pending.pop() {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
+fn unix_seconds(time: std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    time.ok()?.duration_since(UNIX_EPOCH).ok().map(|duration| duration.as_secs())
+}
+
+/// Aggregate measurements for one directory tree. File contents are never read.
+#[derive(Default)]
+pub struct DirectoryStats {
+    pub size: u64,
+    pub files: u64,
+    pub directories: u64,
+    pub newest: Option<u64>,
+    pub oldest: Option<u64>,
+    pub created: Option<u64>,
+    pub skipped: u64,
+    pub content: ContentProfile,
+    /// Executables at most two levels deep, largest first (paths are not persisted).
+    pub shallow_executables: Vec<(PathBuf, u64)>,
+}
+
+pub fn inspect_directory(path: &Path, cancel: &AtomicBool) -> DirectoryStats {
+    use content::{ChildAccumulator, LARGE_FILE_BYTES, MAX_TRACKED_CHILDREN};
+    let mut stats = DirectoryStats {
+        created: fs::metadata(path).ok().and_then(|metadata| unix_seconds(metadata.created())),
+        ..Default::default()
+    };
+    let mut children: Vec<ChildAccumulator> = Vec::new();
+    let mut loose: std::collections::BTreeMap<&'static str, ChildAccumulator> = Default::default();
+    let mut extensions: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    let mut untracked = ChildAccumulator::new("Other folders");
+    let mut untracked_children = 0u64;
+    let mut executable_count = 0u64;
+    let mut database_count = 0u64;
+    let mut large_file_count = 0u64;
+    let mut large_file_bytes = 0u64;
+    // (directory, child accumulator index; usize::MAX = untracked, None = root, depth)
+    let mut pending: Vec<(PathBuf, Option<usize>, usize)> = vec![(path.to_path_buf(), None, 0)];
+    while let Some((current, child_index, depth)) = pending.pop() {
+        if cancel.load(Ordering::Relaxed) { break; }
         let Ok(entries) = fs::read_dir(&current) else {
-            skipped += 1;
+            stats.skipped += 1;
             continue;
         };
         for entry in entries {
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-            let Ok(entry) = entry else {
-                skipped += 1;
-                continue;
-            };
-            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
-                skipped += 1;
-                continue;
-            };
+            if cancel.load(Ordering::Relaxed) { break; }
+            let Ok(entry) = entry else { stats.skipped += 1; continue; };
+            let entry_path = entry.path();
+            let Ok(metadata) = fs::symlink_metadata(&entry_path) else { stats.skipped += 1; continue; };
             if is_reparse_point(&metadata) || metadata.file_type().is_symlink() {
-                skipped += 1;
+                stats.skipped += 1;
                 continue;
             }
             if metadata.is_dir() {
-                directories += 1;
-                pending.push(entry.path());
+                stats.directories += 1;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let index = match child_index {
+                    None if children.len() < MAX_TRACKED_CHILDREN => { children.push(ChildAccumulator::new(name)); Some(children.len() - 1) }
+                    None => { untracked_children += 1; Some(usize::MAX) }
+                    Some(index) => {
+                        if index == usize::MAX { untracked.add_directory_name(&name); } else { children[index].add_directory_name(&name); }
+                        Some(index)
+                    }
+                };
+                pending.push((entry_path, index, depth + 1));
             } else if metadata.is_file() {
-                files += 1;
-                size = size.saturating_add(metadata.len());
-                if let Ok(seconds) = metadata.modified().and_then(|t| t.duration_since(UNIX_EPOCH).map_err(std::io::Error::other)) {
-                    newest = Some(newest.map_or(seconds.as_secs(), |old| old.max(seconds.as_secs())));
+                let size = metadata.len();
+                let modified = unix_seconds(metadata.modified());
+                stats.files += 1;
+                stats.size = stats.size.saturating_add(size);
+                if let Some(seconds) = modified {
+                    stats.newest = Some(stats.newest.map_or(seconds, |old| old.max(seconds)));
+                    stats.oldest = Some(stats.oldest.map_or(seconds, |old| old.min(seconds)));
+                }
+                let extension = entry_path.extension().map(|extension| extension.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+                if !extension.is_empty() && extension.len() <= 16 {
+                    let stat = extensions.entry(extension.clone()).or_default();
+                    stat.0 = stat.0.saturating_add(size);
+                    stat.1 += 1;
+                }
+                match extension.as_str() {
+                    "exe" => {
+                        executable_count += 1;
+                        if depth <= 1 { stats.shallow_executables.push((entry_path.clone(), size)); }
+                    }
+                    "sqlite" | "sqlite3" | "db" | "db3" | "mdb" | "accdb" => database_count += 1,
+                    _ => {}
+                }
+                if size >= LARGE_FILE_BYTES {
+                    large_file_count += 1;
+                    large_file_bytes = large_file_bytes.saturating_add(size);
+                }
+                match child_index {
+                    None => {
+                        let kind = content::kind_for_extension(&extension).unwrap_or("unknown");
+                        loose.entry(kind).or_insert_with(|| ChildAccumulator::new(kind)).add_file(&extension, size, modified);
+                    }
+                    Some(usize::MAX) => untracked.add_file(&extension, size, modified),
+                    Some(index) => children[index].add_file(&extension, size, modified),
                 }
             }
         }
     }
-    (size, files, directories, newest, skipped)
+    stats.shallow_executables.sort_by(|left, right| right.1.cmp(&left.1));
+    stats.shallow_executables.truncate(3);
+    stats.content = content::build_profile(children, loose, extensions, executable_count, database_count, large_file_count, large_file_bytes, untracked_children);
+    if untracked_children > 0 {
+        let mut item = untracked.into_item(false);
+        item.name = format!("{untracked_children} more folders");
+        item.reason = format!("Only the first {MAX_TRACKED_CHILDREN} folders are listed individually. {}", item.reason);
+        stats.content.items.push(item);
+    }
+    stats
 }
 
 fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, String, String, Vec<Evidence>) {
@@ -765,6 +963,7 @@ fn enrich_directory(result: &mut DirectoryResult, apps: &[Application]) {
     let Some(name) = Path::new(&result.path).file_name() else { return; };
     let Some(known) = known_locations::lookup(&result.root, &name.to_string_lossy()) else { return; };
     result.owner_hint = Some(known.label.into());
+    result.location_class = Some(known.class.as_str().into());
     result.ownership = "known_location".into();
     result.orphan_status = if known.possible_former { "possibly_orphaned" } else { "known_application_data" }.into();
     result.evidence.push(Evidence {
@@ -790,6 +989,7 @@ pub fn classify_directory(path: &Path, root: &str, apps: &[Application]) -> Dire
         path: path.to_string_lossy().into_owned(), root: root.to_owned(), parent_path: None, size_bytes: 0,
         file_count: 0, directory_count: 0, newest_modified_unix: None,
         skipped_entries: 0, owner, owner_hint: None, ownership, orphan_status, evidence,
+        ..Default::default()
     };
     enrich_directory(&mut result, apps);
     result
@@ -852,8 +1052,14 @@ pub fn apply_history(result: &mut DirectoryResult, current: &Inventory, previous
         _ => false,
     };
     if !previously_observed { return; }
+    // The registered installation folder disappearing together with the registration
+    // upgrades a name-based relationship: the uninstall is observed, not inferred.
+    let install_removed = previous_owner.install_location.as_deref()
+        .filter(|location| location.len() > 3 && Path::new(location).is_absolute())
+        .is_some_and(|location| !Path::new(location).exists() && !location.eq_ignore_ascii_case(&result.path));
     let strong_history = previous_result.ownership == "confirmed"
-        || previous_result.ownership == "historical_confirmed";
+        || previous_result.ownership == "historical_confirmed"
+        || install_removed;
     result.owner = Some(previous_owner.clone());
     result.ownership = if strong_history { "historical_confirmed" } else { "historical_likely" }.into();
     result.orphan_status = if strong_history { "probable_orphan" } else { "possibly_orphaned" }.into();
@@ -862,6 +1068,14 @@ pub fn apply_history(result: &mut DirectoryResult, current: &Inventory, previous
         description: format!("A previous completed scan linked this exact directory to {}.", previous_owner.name),
         strength: if strong_history { "strong" } else { "medium" }.into(),
     });
+    if install_removed {
+        let location = previous_owner.install_location.as_deref().unwrap_or_default();
+        result.evidence.push(Evidence {
+            kind: "install_location_removed".into(),
+            description: format!("{}'s registered installation folder ({location}) no longer exists.", previous_owner.name),
+            strength: "strong".into(),
+        });
+    }
     result.evidence.push(Evidence {
         kind: "missing_installed_app".into(),
         description: format!("{} is absent from the current uninstall and current-user package inventory. Portable or unregistered installations may still exist.", previous_owner.name),
@@ -869,24 +1083,153 @@ pub fn apply_history(result: &mut DirectoryResult, current: &Inventory, previous
     });
 }
 
-fn scan_target(path: PathBuf, root: &str, parent_path: Option<&Path>, count_bytes: bool, apps: &[Application], cancel: &AtomicBool, summary: &mut ScanSummary, on_result: &mut impl FnMut(DirectoryResult), on_progress: &mut impl FnMut(String)) {
-    if cancel.load(Ordering::Relaxed) { return; }
-    on_progress(path.to_string_lossy().into_owned());
-    let (size, files, directories, newest, skipped) = inspect_directory(&path, cancel);
-    if cancel.load(Ordering::Relaxed) { return; }
-    summary.directories += 1;
-    if count_bytes {
-        summary.bytes = summary.bytes.saturating_add(size);
-        summary.skipped_entries += skipped;
+/// Applies a known location's content category to otherwise unclassified items.
+fn apply_location_content(result: &mut DirectoryResult) {
+    let Some(name) = Path::new(&result.path).file_name().map(|name| name.to_string_lossy().into_owned()) else { return; };
+    let Some(known) = known_locations::lookup(&result.root, &name) else { return; };
+    if result.location_class.is_none() {
+        result.location_class = Some(known.class.as_str().into());
     }
-    let mut result = classify_directory(&path, root, apps);
-    result.parent_path = parent_path.map(|parent| parent.to_string_lossy().into_owned());
-    result.size_bytes = size;
-    result.file_count = files;
-    result.directory_count = directories;
-    result.newest_modified_unix = newest;
-    result.skipped_entries = skipped;
-    on_result(result);
+    let Some(kind) = known.content_kind else { return; };
+    for item in &mut result.content.items {
+        if item.kind == "unknown" || (item.source == "extension" && content::safety_for_kind(&item.kind) == content::UNKNOWN) {
+            item.kind = kind.into();
+            item.safety = content::safety_for_kind(kind).into();
+            item.source = "location".into();
+            item.reason = format!("Inside {}, a recognized {} location.", known.label, content::kind_label(kind).to_lowercase());
+        }
+    }
+}
+
+/// Reads version metadata from up to three shallow executables and uses it to
+/// link unmatched installation folders or mark them as unregistered/portable.
+fn apply_executable_metadata(result: &mut DirectoryResult, shallow: &[(PathBuf, u64)], apps: &[Application]) {
+    if shallow.is_empty() || !matches!(result.orphan_status.as_str(), "unknown" | "associated_with_installed") {
+        return;
+    }
+    if matches!(result.location_class.as_deref(), Some("system" | "shared_runtime")) { return; }
+    let infos: Vec<ExecutableInfo> = shallow.iter().filter_map(|(path, _)| executables::read_executable_info(path)).collect();
+    if infos.is_empty() { return; }
+    let describe = |info: &ExecutableInfo| {
+        let mut parts = vec![info.file_name.clone()];
+        if let Some(product) = &info.product_name { parts.push(format!("product “{product}”")); }
+        if let Some(company) = &info.company_name { parts.push(format!("company “{company}”")); }
+        if let Some(version) = &info.product_version { parts.push(format!("version {version}")); }
+        parts.join(", ")
+    };
+    result.executables = infos.clone();
+    if result.orphan_status == "unknown" {
+        // An executable whose ProductName exactly names one installed product links the folder.
+        let mut matches: Vec<&Application> = Vec::new();
+        for info in &infos {
+            let Some(product) = info.product_name.as_deref().map(normalize_name).filter(|name| name.len() >= 4) else { continue; };
+            for app in apps {
+                if normalize_name(&product_name_without_version(&app.name)) == product || normalize_name(&app.name) == product {
+                    if !matches.iter().any(|existing| existing.id == app.id) { matches.push(app); }
+                }
+            }
+        }
+        if matches.len() == 1 {
+            let app = matches[0];
+            let info = infos.iter().find(|info| info.product_name.is_some()).unwrap_or(&infos[0]);
+            result.evidence.push(Evidence {
+                kind: "executable_metadata".into(),
+                description: format!("Version metadata of {} names installed product {}. The file was read, never run.", describe(info), app.name),
+                strength: "medium".into(),
+            });
+            result.owner = Some(app.clone());
+            result.owner_hint = None;
+            result.ownership = "likely".into();
+            result.orphan_status = "not_orphaned".into();
+            return;
+        }
+        let info = &infos[0];
+        result.owner_hint = info.product_name.clone().or_else(|| info.file_description.clone()).or_else(|| Some(info.file_name.clone()));
+        result.ownership = "unregistered".into();
+        result.orphan_status = "unregistered_application".into();
+        result.evidence.push(Evidence {
+            kind: "executable_metadata".into(),
+            description: format!("Contains application executables ({}) that match no uninstall registration or package. This may be a portable or manually copied application rather than leftovers.", infos.iter().map(describe).collect::<Vec<_>>().join("; ")),
+            strength: "weak".into(),
+        });
+    } else {
+        result.evidence.push(Evidence {
+            kind: "executable_metadata".into(),
+            description: format!("Executable metadata inside this shared folder: {}.", infos.iter().map(describe).collect::<Vec<_>>().join("; ")),
+            strength: "weak".into(),
+        });
+    }
+}
+
+/// Relates system references to a directory. Live references mark the folder as
+/// in use; dead references are weak evidence that software was removed.
+pub fn apply_references(result: &mut DirectoryResult, references: &[SystemReference]) {
+    let mut live = Vec::new();
+    let mut dead = Vec::new();
+    for reference in references {
+        let Some(target) = reference.target_path.as_deref() else { continue; };
+        if !references::path_is_within(target, &result.path) { continue; }
+        match reference.status.as_str() {
+            "ok" => live.push(reference),
+            "dead" => dead.push(reference),
+            _ => {}
+        }
+    }
+    let describe = |items: &[&SystemReference]| items.iter().take(3)
+        .map(|reference| format!("{} “{}”", references::kind_label(&reference.kind).to_lowercase(), reference.name))
+        .collect::<Vec<_>>().join(", ");
+    if !live.is_empty() {
+        result.evidence.push(Evidence {
+            kind: "active_reference".into(),
+            description: format!("{} existing system reference(s) use files in this folder: {}.", live.len(), describe(&live)),
+            strength: "medium".into(),
+        });
+        if result.orphan_status == "unknown" {
+            result.owner_hint = Some(references::display_owner(live[0]));
+            result.ownership = "referenced".into();
+            result.orphan_status = "referenced_by_system".into();
+        }
+    }
+    if !dead.is_empty() {
+        result.evidence.push(Evidence {
+            kind: "dead_reference".into(),
+            description: format!("{} system reference(s) point to missing files in this folder: {}. The software that created them appears to have been removed.", dead.len(), describe(&dead)),
+            strength: "weak".into(),
+        });
+        if result.orphan_status == "unknown" && live.is_empty() {
+            result.owner_hint = Some(references::display_owner(dead[0]));
+            result.ownership = "reference_inferred".into();
+            result.orphan_status = "possibly_orphaned".into();
+        }
+    }
+}
+
+/// A directory selected for measurement.
+#[derive(Clone, Debug)]
+pub struct ScanTarget {
+    pub path: PathBuf,
+    pub root: String,
+    pub parent_path: Option<PathBuf>,
+    /// False for nested targets whose bytes are already counted by their parent.
+    pub count_bytes: bool,
+}
+
+fn measure_target(target: &ScanTarget, apps: &[Application], cancel: &AtomicBool) -> Option<DirectoryResult> {
+    let stats = inspect_directory(&target.path, cancel);
+    if cancel.load(Ordering::Relaxed) { return None; }
+    let mut result = classify_directory(&target.path, &target.root, apps);
+    result.parent_path = target.parent_path.as_ref().map(|parent| parent.to_string_lossy().into_owned());
+    result.size_bytes = stats.size;
+    result.file_count = stats.files;
+    result.directory_count = stats.directories;
+    result.newest_modified_unix = stats.newest;
+    result.oldest_modified_unix = stats.oldest;
+    result.created_unix = stats.created;
+    result.skipped_entries = stats.skipped;
+    result.content = stats.content;
+    apply_location_content(&mut result);
+    apply_executable_metadata(&mut result, &stats.shallow_executables, apps);
+    Some(result)
 }
 
 fn nested_product_targets(parent: &Path, root: &str, apps: &[Application]) -> Vec<PathBuf> {
@@ -920,53 +1263,149 @@ fn is_excluded(path: &Path, excluded_paths: &[PathBuf]) -> bool {
     excluded_paths.iter().any(|excluded| path.to_string_lossy().eq_ignore_ascii_case(&excluded.to_string_lossy()))
 }
 
-pub fn scan<F, P>(apps: &[Application], excluded_paths: &[PathBuf], cancel: &AtomicBool, mut on_result: F, mut on_progress: P) -> ScanSummary
-where
-    F: FnMut(DirectoryResult),
-    P: FnMut(String),
-{
-    let mut summary = ScanSummary::default();
-    let (roots, warnings) = scan_roots();
-    summary.warnings = warnings;
-    for (label, root) in roots {
+fn child_directories(path: &Path, summary: &mut ScanSummary) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(path) else { summary.skipped_entries += 1; return Vec::new(); };
+    let mut directories = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { summary.skipped_entries += 1; continue; };
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else { summary.skipped_entries += 1; continue; };
+        if metadata.is_dir() && !is_reparse_point(&metadata) {
+            directories.push(entry.path());
+        }
+    }
+    directories.sort();
+    directories
+}
+
+/// Enumerates the directories a scan in `mode` measures.
+pub fn collect_targets(apps: &[Application], mode: ScanMode, excluded_paths: &[PathBuf], summary: &mut ScanSummary, cancel: &AtomicBool) -> Vec<ScanTarget> {
+    let (roots, warnings, expected_roots) = scan_roots(mode);
+    summary.warnings.extend(warnings);
+    let mut targets = Vec::new();
+    let mut enumerated = 0usize;
+    for root in roots {
         if cancel.load(Ordering::Relaxed) { break; }
-        let Ok(entries) = fs::read_dir(&root) else {
+        let label = root.label.clone();
+        if fs::read_dir(&root.path).is_err() {
             summary.skipped_entries += 1;
-            summary.warnings.push(format!("{label} could not be enumerated: {}", root.display()));
+            summary.warnings.push(format!("{label} could not be enumerated: {}", root.path.display()));
             continue;
-        };
-        summary.scanned_roots.push(format!("{label}: {}", root.display()));
-        for entry in entries {
-            if cancel.load(Ordering::Relaxed) { break; }
-            let Ok(entry) = entry else { summary.skipped_entries += 1; continue; };
-            let Ok(metadata) = fs::symlink_metadata(entry.path()) else { summary.skipped_entries += 1; continue; };
-            if !metadata.is_dir() || is_reparse_point(&metadata) { continue; }
-            let path = entry.path();
+        }
+        enumerated += 1;
+        summary.scanned_roots.push(format!("{label}: {}", root.path.display()));
+        for path in child_directories(&root.path, summary) {
             if is_excluded(&path, excluded_paths) { continue; }
-            let structural_container = label == "Local" && ["Packages", "Programs"].iter().any(|name| entry.file_name().to_string_lossy().eq_ignore_ascii_case(name));
+            let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+            if label == "UserProfile" {
+                if known_locations::USER_PROFILE_DEVELOPER_FOLDERS.iter().any(|folder| folder.eq_ignore_ascii_case(&name)) {
+                    targets.push(ScanTarget { path, root: label.clone(), parent_path: None, count_bytes: true });
+                }
+                continue;
+            }
+            let structural_container = label == "Local" && ["Packages", "Programs"].iter().any(|container| name.eq_ignore_ascii_case(container));
             if structural_container {
-                let Ok(children) = fs::read_dir(&path) else { summary.skipped_entries += 1; continue; };
-                for child in children {
-                    if cancel.load(Ordering::Relaxed) { break; }
-                    let Ok(child) = child else { summary.skipped_entries += 1; continue; };
-                    let child_path = child.path();
-                    if is_excluded(&child_path, excluded_paths) { continue; }
-                    let Ok(child_metadata) = fs::symlink_metadata(&child_path) else { summary.skipped_entries += 1; continue; };
-                    if !child_metadata.is_dir() || is_reparse_point(&child_metadata) { continue; }
-                    scan_target(child_path, &label, None, true, apps, cancel, &mut summary, &mut on_result, &mut on_progress);
+                for child in child_directories(&path, summary) {
+                    if is_excluded(&child, excluded_paths) { continue; }
+                    targets.push(ScanTarget { path: child, root: label.clone(), parent_path: None, count_bytes: true });
                 }
             } else {
-                let nested_targets = nested_product_targets(&path, &label, apps);
-                scan_target(path.clone(), &label, None, true, apps, cancel, &mut summary, &mut on_result, &mut on_progress);
-                for child in nested_targets {
-                    if cancel.load(Ordering::Relaxed) { break; }
-                    scan_target(child, &label, Some(&path), false, apps, cancel, &mut summary, &mut on_result, &mut on_progress);
+                let nested = nested_product_targets(&path, &label, apps);
+                targets.push(ScanTarget { path: path.clone(), root: label.clone(), parent_path: None, count_bytes: true });
+                for child in nested {
+                    targets.push(ScanTarget { path: child, root: label.clone(), parent_path: Some(path.clone()), count_bytes: false });
                 }
             }
         }
     }
+    summary.complete = enumerated == expected_roots;
+    targets
+}
+
+enum WorkerMessage {
+    Progress(String),
+    Result(Box<DirectoryResult>, bool, u64, u64),
+}
+
+/// Measures targets on a small worker pool and streams results in completion
+/// order. Worker count is capped to limit disk thrashing (spec §30).
+pub fn scan_targets<F, P>(targets: Vec<ScanTarget>, apps: &[Application], cancel: &AtomicBool, summary: &mut ScanSummary, mut on_result: F, mut on_progress: P)
+where
+    F: FnMut(DirectoryResult),
+    P: FnMut(String),
+{
+    let workers = std::thread::available_parallelism().map(|count| count.get()).unwrap_or(2).clamp(1, 4).min(targets.len().max(1));
+    // Largest-looking targets first tends to finish sooner overall; sort by name for stability.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (sender, receiver) = std::sync::mpsc::channel::<WorkerMessage>();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let targets = &targets;
+            let next = &next;
+            scope.spawn(move || {
+                loop {
+                    if cancel.load(Ordering::Relaxed) { break; }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(target) = targets.get(index) else { break; };
+                    let _ = sender.send(WorkerMessage::Progress(target.path.to_string_lossy().into_owned()));
+                    if let Some(result) = measure_target(target, apps, cancel) {
+                        let size = result.size_bytes;
+                        let skipped = result.skipped_entries;
+                        if sender.send(WorkerMessage::Result(Box::new(result), target.count_bytes, size, skipped)).is_err() { break; }
+                    }
+                }
+            });
+        }
+        drop(sender);
+        for message in receiver {
+            match message {
+                WorkerMessage::Progress(path) => on_progress(path),
+                WorkerMessage::Result(result, count_bytes, size, skipped) => {
+                    summary.directories += 1;
+                    if count_bytes {
+                        summary.bytes = summary.bytes.saturating_add(size);
+                        summary.skipped_entries += skipped;
+                    }
+                    on_result(*result);
+                }
+            }
+        }
+    });
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or_default()
+}
+
+/// Runs a full scan in the given mode.
+pub fn scan_with_mode<F, P>(apps: &[Application], mode: ScanMode, excluded_paths: &[PathBuf], cancel: &AtomicBool, on_result: F, on_progress: P) -> ScanSummary
+where
+    F: FnMut(DirectoryResult),
+    P: FnMut(String),
+{
+    let started = std::time::Instant::now();
+    let mut summary = ScanSummary { mode: mode.as_str().into(), started_at_unix: now_unix(), ..Default::default() };
+    let targets = collect_targets(apps, mode, excluded_paths, &mut summary, cancel);
+    scan_targets(targets, apps, cancel, &mut summary, on_result, on_progress);
     summary.canceled = cancel.load(Ordering::Relaxed);
+    summary.complete = summary.complete && !summary.canceled;
+    summary.duration_ms = started.elapsed().as_millis() as u64;
     summary
+}
+
+/// Quick scan compatible with earlier callers.
+pub fn scan<F, P>(apps: &[Application], excluded_paths: &[PathBuf], cancel: &AtomicBool, on_result: F, on_progress: P) -> ScanSummary
+where
+    F: FnMut(DirectoryResult),
+    P: FnMut(String),
+{
+    scan_with_mode(apps, ScanMode::Quick, excluded_paths, cancel, on_result, on_progress)
+}
+
+/// Finalizes a result after history, public data, definitions and references
+/// have been applied: computes the separate assessment.
+pub fn finalize(result: &mut DirectoryResult) {
+    result.assessment = assess(result, now_unix());
 }
 
 #[cfg(test)]
@@ -1266,6 +1705,67 @@ mod tests {
         assert!(is_excluded(Path::new(r"c:\users\test\appdata\local\DEV.ORPHANCLEANER.DESKTOP"), &excluded));
     }
 
+    fn temp_tree(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("orphan-cleaner-{name}-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn inspection_profiles_children_without_reading_contents() {
+        let root = temp_tree("inspect").join("OldApp");
+        fs::create_dir_all(root.join("Cache").join("deep")).unwrap();
+        fs::create_dir_all(root.join("Profiles").join("SaveGames")).unwrap();
+        fs::write(root.join("Cache").join("deep").join("a.bin"), vec![0u8; 2048]).unwrap();
+        fs::write(root.join("Profiles").join("SaveGames").join("slot1.sav"), b"x").unwrap();
+        fs::write(root.join("app.log"), b"log").unwrap();
+        let stats = inspect_directory(&root, &AtomicBool::new(false));
+        assert_eq!(stats.files, 3);
+        assert_eq!(stats.size, 2048 + 1 + 3);
+        let cache = stats.content.items.iter().find(|item| item.name == "Cache").unwrap();
+        assert_eq!(cache.safety, "safe");
+        assert_eq!(cache.size_bytes, 2048);
+        let profiles = stats.content.items.iter().find(|item| item.name == "Profiles").unwrap();
+        assert_eq!(profiles.safety, "preserve");
+        assert!(stats.content.items.iter().any(|item| !item.is_directory && item.kind == "log"));
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn parallel_target_scan_reports_every_target_once() {
+        let base = temp_tree("parallel");
+        let targets = (0..9).map(|index| {
+            let path = base.join(format!("App{index}"));
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("f.txt"), vec![1u8; index + 1]).unwrap();
+            ScanTarget { path, root: "Roaming".into(), parent_path: None, count_bytes: true }
+        }).collect::<Vec<_>>();
+        let mut summary = ScanSummary::default();
+        let mut seen = Vec::new();
+        scan_targets(targets, &[], &AtomicBool::new(false), &mut summary, |result| seen.push(result.path), |_| {});
+        assert_eq!(seen.len(), 9);
+        assert_eq!(summary.bytes, (1..=9).sum::<u64>());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn references_mark_folders_live_or_dead() {
+        let live = SystemReference { kind: "service".into(), name: "Vendor Service".into(), status: "ok".into(),
+            target_path: Some(r"C:\ProgramData\Vendor\svc.exe".into()), ..Default::default() };
+        let mut result = example_result(None, "unknown", "unknown");
+        result.path = r"C:\ProgramData\Vendor".into();
+        apply_references(&mut result, std::slice::from_ref(&live));
+        assert_eq!(result.orphan_status, "referenced_by_system");
+        let dead = SystemReference { status: "dead".into(), kind: "startup_run".into(), name: "OldApp".into(),
+            target_path: Some(r"C:\Users\T\AppData\Local\OldApp\old.exe".into()), ..Default::default() };
+        let mut result = example_result(None, "unknown", "unknown");
+        result.path = r"C:\Users\T\AppData\Local\OldApp".into();
+        apply_references(&mut result, &[dead]);
+        assert_eq!(result.orphan_status, "possibly_orphaned");
+        assert_eq!(result.owner_hint.as_deref(), Some("OldApp"));
+    }
+
     fn example_app(id: &str) -> Application {
         Application { id: id.into(), name: "Example".into(), publisher: None, version: None,
             install_location: None, display_icon_executable: None, package_family_name: None, sources: vec!["registry".into()] }
@@ -1280,7 +1780,7 @@ mod tests {
     fn example_result(owner: Option<Application>, ownership: &str, status: &str) -> DirectoryResult {
         DirectoryResult { path: r"C:\Users\Test\AppData\Roaming\Example".into(), root: "Roaming".into(), parent_path: None,
             size_bytes: 100, file_count: 1, directory_count: 0, newest_modified_unix: None,
-            skipped_entries: 0, owner, owner_hint: None, ownership: ownership.into(), orphan_status: status.into(), evidence: vec![] }
+            skipped_entries: 0, owner, owner_hint: None, ownership: ownership.into(), orphan_status: status.into(), evidence: vec![], ..Default::default() }
     }
 
     #[test]

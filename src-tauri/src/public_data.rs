@@ -1,4 +1,6 @@
 use cleaner_core::public_data::FolderKnowledge;
+
+pub type Knowledge = FolderKnowledge;
 use reqwest::blocking::Client;
 use reqwest::header::{ETAG, IF_NONE_MATCH};
 use serde::{Deserialize, Serialize};

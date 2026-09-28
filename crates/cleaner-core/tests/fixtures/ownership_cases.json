@@ -748,5 +748,46 @@
       "orphanStatus": "unknown",
       "evidenceKinds": []
     }
+  },
+  {
+    "id": "nested-versioned-product-with-publisher-prefix",
+    "rationale": "Standalone JetBrains installers register \"JetBrains Rider 2024.1\" while the data folder is named Rider2024.1; the publisher prefix repeated in the product name must not prevent an exact product and version match.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\JetBrains\\Rider2024.1",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "rider-standalone",
+        "name": "JetBrains Rider 2024.1.2",
+        "publisher": "JetBrains s.r.o.",
+        "version": "2024.1.2"
+      }
+    ],
+    "expected": {
+      "ownerId": "rider-standalone",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": [
+        "nested_product_version_match"
+      ]
+    }
+  },
+  {
+    "id": "publisher-prefix-requires-exact-remainder-negative-control",
+    "rationale": "Stripping the publisher prefix still requires the remaining product name to equal the folder product exactly; a different JetBrains product with the same version stays unknown.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\JetBrains\\WebStorm2024.1",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "rider-standalone",
+        "name": "JetBrains Rider 2024.1.2",
+        "publisher": "JetBrains s.r.o.",
+        "version": "2024.1.2"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
   }
 ]
