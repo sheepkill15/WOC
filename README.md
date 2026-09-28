@@ -15,9 +15,15 @@ Run checks:
 
 ```powershell
 npm run build
-cargo test -p cleaner-core
+cargo test --workspace
 cargo check -p windows-orphan-cleaner
 ```
+
+## Ownership validation corpus
+
+`crates/cleaner-core/tests/fixtures/ownership_cases.json` is the reviewed regression corpus for directory ownership. Each case records the observed layout, synthetic installed-application evidence, the expected classification and evidence kinds, plus a rationale for the expectation. It includes positive matches, shared/vendor data, known locations, possible former data, and negative controls that must remain unknown.
+
+The `ownership_corpus` integration test runs every case through the same `classify_directory` entry point used by the live scanner. Add a case whenever a real machine reveals a correct match, false positive, or unresolved pattern; redact usernames and other personal path components before committing it.
 
 ## Current behavior
 
@@ -39,4 +45,4 @@ The folder-data panel links to the sources and their terms. Ludusavi's repositor
 
 ## Planned next work
 
-Broaden historical observations and build an audited validation corpus before making stronger orphan claims. Nested vendor-directory discovery can follow once top-level ownership is reliable. Cleanup remains out of scope until ownership and classification are reliable.
+Grow the validation corpus with audited observations from real machines and broaden historical observations before making stronger orphan claims. Nested vendor-directory discovery can follow once top-level ownership is reliable. Cleanup remains out of scope until ownership and classification are reliable.

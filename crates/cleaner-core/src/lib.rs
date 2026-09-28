@@ -492,6 +492,20 @@ fn enrich_directory(result: &mut DirectoryResult, apps: &[Application]) {
     }
 }
 
+/// Classifies a directory without traversing its contents. This is the shared
+/// entry point for the live scanner and the fixture-based ownership corpus.
+/// Size and timestamp fields remain empty until the scanner measures them.
+pub fn classify_directory(path: &Path, root: &str, apps: &[Application]) -> DirectoryResult {
+    let (owner, ownership, orphan_status, evidence) = resolve_owner(path, apps);
+    let mut result = DirectoryResult {
+        path: path.to_string_lossy().into_owned(), root: root.to_owned(), size_bytes: 0,
+        file_count: 0, directory_count: 0, newest_modified_unix: None,
+        skipped_entries: 0, owner, owner_hint: None, ownership, orphan_status, evidence,
+    };
+    enrich_directory(&mut result, apps);
+    result
+}
+
 fn same_application(left: &Application, right: &Application) -> bool {
     left.id.eq_ignore_ascii_case(&right.id)
         || left.package_family_name.as_deref().zip(right.package_family_name.as_deref())
@@ -539,16 +553,15 @@ fn scan_target(path: PathBuf, root: &str, apps: &[Application], cancel: &AtomicB
     on_progress(path.to_string_lossy().into_owned());
     let (size, files, directories, newest, skipped) = inspect_directory(&path, cancel);
     if cancel.load(Ordering::Relaxed) { return; }
-    let (owner, ownership, orphan_status, evidence) = resolve_owner(&path, apps);
     summary.directories += 1;
     summary.bytes = summary.bytes.saturating_add(size);
     summary.skipped_entries += skipped;
-    let mut result = DirectoryResult {
-        path: path.to_string_lossy().into_owned(), root: root.to_owned(), size_bytes: size,
-        file_count: files, directory_count: directories, newest_modified_unix: newest,
-        skipped_entries: skipped, owner, owner_hint: None, ownership, orphan_status, evidence,
-    };
-    enrich_directory(&mut result, apps);
+    let mut result = classify_directory(&path, root, apps);
+    result.size_bytes = size;
+    result.file_count = files;
+    result.directory_count = directories;
+    result.newest_modified_unix = newest;
+    result.skipped_entries = skipped;
     on_result(result);
 }
 

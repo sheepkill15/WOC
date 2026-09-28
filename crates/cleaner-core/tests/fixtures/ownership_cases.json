@@ -1,0 +1,240 @@
+[
+  {
+    "id": "installed-exact-name",
+    "rationale": "An exact normalized directory name is useful ownership evidence, but not proof of an installation path.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\Notion",
+    "root": "Roaming",
+    "applications": [
+      { "id": "notion", "name": "Notion" }
+    ],
+    "expected": {
+      "ownerId": "notion",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["directory_name_match"]
+    }
+  },
+  {
+    "id": "installed-versioned-name",
+    "rationale": "A version suffix in the uninstall name should not disconnect the stable product data folder.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\Signal",
+    "root": "Roaming",
+    "applications": [
+      { "id": "signal", "name": "Signal 8.28.0", "version": "8.28.0" }
+    ],
+    "expected": {
+      "ownerId": "signal",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["directory_name_match"]
+    }
+  },
+  {
+    "id": "registered-install-path",
+    "rationale": "An exact registered install location is strong evidence and should outrank name heuristics.",
+    "path": "C:\\Apps\\ExampleUtility",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "example-utility",
+        "name": "Different Display Name",
+        "installLocation": "C:\\Apps\\ExampleUtility"
+      }
+    ],
+    "expected": {
+      "ownerId": "example-utility",
+      "ownership": "confirmed",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["install_path_match"]
+    }
+  },
+  {
+    "id": "msix-package-family",
+    "rationale": "The exact package family owns its Packages directory even when another application's display name collides.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Packages\\Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "calculator-package",
+        "name": "Calculator",
+        "packageFamilyName": "Microsoft.WindowsCalculator_8wekyb3d8bbwe"
+      },
+      {
+        "id": "name-collision",
+        "name": "Microsoft.WindowsCalculator_8wekyb3d8bbwe"
+      }
+    ],
+    "expected": {
+      "ownerId": "calculator-package",
+      "ownership": "confirmed",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["package_family_match"]
+    }
+  },
+  {
+    "id": "msix-product-name-variant",
+    "rationale": "A package product suffix may map an ordinary application data folder without claiming package-family certainty.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\Codex",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "codex-package",
+        "name": "OpenAI.Codex",
+        "packageFamilyName": "OpenAI.Codex_2p2nqsd0c76g0"
+      }
+    ],
+    "expected": {
+      "ownerId": "codex-package",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["directory_name_match"]
+    }
+  },
+  {
+    "id": "shared-publisher-folder",
+    "rationale": "A publisher folder used by several installed products is shared data, not a single-owner match.",
+    "path": "C:\\ProgramData\\NVIDIA Corporation",
+    "root": "ProgramData",
+    "applications": [
+      { "id": "nvidia-driver", "name": "NVIDIA Graphics Driver 617.14", "publisher": "NVIDIA Corporation" },
+      { "id": "nvidia-app", "name": "NVIDIA App 11.0.9.251", "publisher": "NVIDIA Corporation" }
+    ],
+    "expected": {
+      "ownerHint": "NVIDIA Corporation",
+      "ownership": "shared",
+      "orphanStatus": "associated_with_installed",
+      "evidenceKinds": ["vendor_or_install_segment"]
+    }
+  },
+  {
+    "id": "install-path-vendor-component",
+    "rationale": "A distinctive install-path component can associate a vendor folder, but cannot establish exclusive ownership.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\BraveSoftware",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "brave",
+        "name": "Brave",
+        "installLocation": "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application"
+      }
+    ],
+    "expected": {
+      "ownerHint": "BraveSoftware",
+      "ownership": "shared",
+      "orphanStatus": "associated_with_installed",
+      "evidenceKinds": ["vendor_or_install_segment"]
+    }
+  },
+  {
+    "id": "known-product-alias-shared-editions",
+    "rationale": "TFT is a known product alias and two installed editions must remain a shared association.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\TFT",
+    "root": "Local",
+    "applications": [
+      { "id": "tft-live", "name": "Teamfight Tactics", "publisher": "Riot Games, Inc" },
+      { "id": "tft-pbe", "name": "Teamfight Tactics PBE", "publisher": "Riot Games, Inc" }
+    ],
+    "expected": {
+      "ownerHint": "Teamfight Tactics",
+      "ownership": "shared",
+      "orphanStatus": "associated_with_installed",
+      "evidenceKinds": ["multiple_matches", "known_product_alias"]
+    }
+  },
+  {
+    "id": "unknown-is-not-orphan",
+    "rationale": "No evidence must remain unknown rather than becoming an orphan claim.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\OldGame",
+    "root": "Roaming",
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "known-platform-data",
+    "rationale": "WSL data is recognized for explanation but is not an orphan candidate.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\wsl",
+    "root": "Local",
+    "expected": {
+      "ownerHint": "Windows Subsystem for Linux",
+      "ownership": "known_location",
+      "orphanStatus": "known_application_data",
+      "evidenceKinds": ["known_location"]
+    }
+  },
+  {
+    "id": "possible-former-app-data",
+    "rationale": "A curated application folder with no registration is only a possible leftover because portable installs may exist.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\Image-Line",
+    "root": "Roaming",
+    "expected": {
+      "ownerHint": "Image-Line",
+      "ownership": "known_location",
+      "orphanStatus": "possibly_orphaned",
+      "evidenceKinds": ["known_location", "missing_installed_app"]
+    }
+  },
+  {
+    "id": "active-app-overrides-former-hint",
+    "rationale": "An installed exact-name match must prevent a curated former-data hint from producing a false positive.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\Image-Line",
+    "root": "Roaming",
+    "applications": [
+      { "id": "image-line", "name": "Image-Line" }
+    ],
+    "expected": {
+      "ownerId": "image-line",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["directory_name_match"]
+    }
+  },
+  {
+    "id": "version-lookalike-negative-control",
+    "rationale": "A different year-specific product folder must not be connected by fuzzy similarity.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Rider2024.1",
+    "root": "Local",
+    "applications": [
+      { "id": "rider-2025", "name": "Rider2025.1" }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "publisher-prefix-negative-control",
+    "rationale": "A publisher prefix is too weak; only a normalized full publisher or vendor name may associate the folder.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Micro",
+    "root": "Local",
+    "applications": [
+      { "id": "microsoft-app", "name": "Example Microsoft App", "publisher": "Microsoft Corporation" }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "generic-install-component-negative-control",
+    "rationale": "Generic path components such as Programs must not become vendor associations.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Programs",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "generic-path-app",
+        "name": "Unrelated Tool",
+        "installLocation": "C:\\Users\\Test\\AppData\\Local\\Programs\\UnrelatedTool"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  }
+]
