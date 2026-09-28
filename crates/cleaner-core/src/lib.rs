@@ -11,7 +11,7 @@ use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_3
 use winreg::RegKey;
 use windows::core::GUID;
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
-use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_ProgramData, FOLDERID_RoamingAppData};
+use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_Downloads, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_ProgramData, FOLDERID_RoamingAppData};
 
 mod known_locations;
 pub mod public_data;
@@ -246,6 +246,16 @@ fn known_folder_path(id: &GUID) -> Option<PathBuf> {
     });
     if initialized { unsafe { CoUninitialize(); } }
     path
+}
+
+pub fn local_app_data_path() -> Option<PathBuf> {
+    known_folder_path(&FOLDERID_LocalAppData)
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+}
+
+pub fn downloads_path() -> Option<PathBuf> {
+    known_folder_path(&FOLDERID_Downloads)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|profile| PathBuf::from(profile).join("Downloads")))
 }
 
 fn scan_roots() -> (Vec<(String, PathBuf)>, Vec<String>) {

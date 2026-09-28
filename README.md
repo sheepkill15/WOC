@@ -6,17 +6,35 @@ Early read-only Windows desktop prototype for the [product specification](./Wind
 
 Requirements: Windows 10/11, Rust, Node.js, npm, and WebView2.
 
+Desktop app:
+
 ```powershell
 npm install
 npm run tauri dev
 ```
+
+Browser app, backed by the same Rust scanner:
+
+```powershell
+# Terminal 1: loopback-only Windows agent
+npm run agent
+
+# Terminal 2: web UI
+npm run dev
+```
+
+Then open `http://localhost:1420`. The browser UI uses the agent for application inventory, scans, cancellation, saved history, public-data updates, and diagnostics export. The scanner and persistence code are shared with the Tauri app rather than reimplemented in TypeScript.
+
+The agent binds to `127.0.0.1:47653` and accepts browser requests from `http://localhost:1420` and `http://127.0.0.1:1420` by default. For a separately hosted frontend, set `ORPHAN_CLEANER_ALLOWED_ORIGINS` on the agent to an exact comma-separated origin list and set `VITE_CLEANER_AGENT_URL` when building the frontend. The agent refuses non-loopback bind addresses.
+
+Build the standalone release agent with `npm run agent:build`; the executable is written to `target\release\cleaner-agent.exe`.
 
 Run checks:
 
 ```powershell
 npm run build
 cargo test --workspace
-cargo check -p windows-orphan-cleaner
+cargo check --workspace --all-targets
 ```
 
 ## Ownership validation corpus
@@ -28,6 +46,7 @@ The `ownership_corpus` integration test runs every case through the same `classi
 ## Current behavior
 
 - Reads per-user and machine uninstall registry entries in 32-bit and 64-bit views, plus current-user MSIX/AppX packages. If MSIX inventory fails, the UI reports it.
+- Runs the same Rust scan job through either Tauri IPC or a loopback HTTP/SSE agent, so the desktop and browser interfaces have the same local capabilities when their backend is running.
 - Finds Local, Roaming, LocalLow, and ProgramData through Windows Known Folder APIs, with a reported environment fallback when needed. It inspects children of Local `Packages` and `Programs` separately, recursively measuring each target without reading file contents.
 - Skips reparse points, reports inaccessible entries, supports cancellation, and streams results to the UI.
 - Links a directory to an installed app by its normalized product name (including common version and architecture suffixes), registered install path, MSIX package family or product name, or an existing executable named by a registry `DisplayIcon` in that directory. Publisher and install-path component matches are shown as **vendor/shared associations** without assigning a single owner or declaring the contents safe or current.

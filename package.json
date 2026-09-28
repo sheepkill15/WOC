@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "agent": "cargo run -p windows-orphan-cleaner --bin cleaner-agent",
+    "agent:build": "cargo build -p windows-orphan-cleaner --bin cleaner-agent --release",
     "build": "tsc -b && vite build",
     "tauri": "tauri"
   },
@@ -22,4 +24,3 @@
     "vite": "^7.0.0"
   }
 }
-

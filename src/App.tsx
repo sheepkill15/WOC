@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { connectBackend, disconnectBackend, invokeBackend, listenBackend, type BackendKind } from "./backend";
 
 type Application = { id: string; name: string; publisher: string | null; version: string | null; installLocation: string | null; displayIconExecutable?: string | null; packageFamilyName: string | null; sources: string[] };
 type Inventory = { applications: Application[]; warnings: string[] };
@@ -21,7 +20,6 @@ type HistoricalApplication = {
 };
 type HistoryReport = { completeScans: number; currentScanAtUnix: number | null; applications: HistoricalApplication[] };
 type DiagnosticsExport = { path: string; scans: number; directories: number };
-const native = "__TAURI_INTERNALS__" in window;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -64,11 +62,12 @@ export default function App() {
   const [history, setHistory] = useState<HistoryReport | null>(null);
   const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
   const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
+  const [backend, setBackend] = useState<BackendKind | "connecting" | "unavailable">("connecting");
+  const [connectNonce, setConnectNonce] = useState(0);
 
   useEffect(() => {
-    if (!native) return;
     let mounted = true;
-    const unlisteners: UnlistenFn[] = [];
+    const unlisteners: Array<() => void> = [];
     function showSaved(scan: SavedScan) {
       setApps(scan.inventory.applications);
       setInventoryWarnings(scan.inventory.warnings);
@@ -78,55 +77,59 @@ export default function App() {
     }
     async function connect() {
       try {
-        const register = (unlisten: UnlistenFn) => { if (mounted) unlisteners.push(unlisten); else unlisten(); };
-        register(await listen<DirectoryResult>("scan-result", event => {
-          if (mounted) setResults(previous => [...previous, event.payload]);
+        const connection = await connectBackend();
+        if (!mounted) return;
+        setBackend(connection.kind);
+        setRunning(connection.running);
+        const register = (unlisten: () => void) => { if (mounted) unlisteners.push(unlisten); else unlisten(); };
+        register(await listenBackend<DirectoryResult>("scan-result", payload => {
+          if (mounted) setResults(previous => [...previous, payload]);
         }));
-        register(await listen<{path: string}>("scan-progress", event => {
-          if (mounted) setCurrentPath(event.payload.path);
+        register(await listenBackend<{path: string}>("scan-progress", payload => {
+          if (mounted) setCurrentPath(payload.path);
         }));
-        register(await listen<ScanFinishedEvent>("scan-finished", event => {
+        register(await listenBackend<ScanFinishedEvent>("scan-finished", payload => {
           if (!mounted) return;
-          setSummary(event.payload.summary);
+          setSummary(payload.summary);
           setRunning(false);
           setCurrentPath("");
-          if (event.payload.saveError) setError(event.payload.saveError);
-          if (event.payload.savedAtUnix !== null || event.payload.summary.canceled || event.payload.saveError) {
+          if (payload.saveError) setError(payload.saveError);
+          if (payload.savedAtUnix !== null || payload.summary.canceled || payload.saveError) {
             void Promise.all([
-              invoke<SavedScan | null>("load_latest_scan"),
-              invoke<HistoryReport>("load_history_report"),
+              invokeBackend<SavedScan | null>("load_latest_scan"),
+              invokeBackend<HistoryReport>("load_history_report"),
             ])
               .then(([scan, report]) => { if (mounted) { if (scan) showSaved(scan); setHistory(report); } })
               .catch(cause => { if (mounted) setError(String(cause)); });
           }
         }));
-        register(await listen<Inventory>("scan-inventory", event => {
-          if (mounted) { setApps(event.payload.applications); setInventoryWarnings(event.payload.warnings); }
+        register(await listenBackend<Inventory>("scan-inventory", payload => {
+          if (mounted) { setApps(payload.applications); setInventoryWarnings(payload.warnings); }
         }));
         let saved: SavedScan | null = null;
         try {
-          const status = await invoke<PublicDataStatus>("public_data_status");
+          const status = await invokeBackend<PublicDataStatus>("public_data_status");
           if (mounted) setPublicData(status);
         } catch (cause) { if (mounted) setDataMessage(`Public folder data could not be loaded: ${String(cause)}`); }
-        try { saved = await invoke<SavedScan | null>("load_latest_scan"); }
+        try { saved = await invokeBackend<SavedScan | null>("load_latest_scan"); }
         catch (cause) { if (mounted) setError(`Saved scan could not be loaded: ${String(cause)}`); }
         if (saved) {
           if (mounted) showSaved(saved);
           try {
-            const report = await invoke<HistoryReport>("load_history_report");
+            const report = await invokeBackend<HistoryReport>("load_history_report");
             if (mounted) setHistory(report);
           } catch (cause) { if (mounted) setError(`Historical observations could not be loaded: ${String(cause)}`); }
         } else {
-          const inventory = await invoke<Inventory>("installed_applications");
+          const inventory = await invokeBackend<Inventory>("installed_applications");
           if (mounted) { setApps(inventory.applications); setInventoryWarnings(inventory.warnings); }
         }
       } catch (cause) {
-        if (mounted) setError(String(cause));
+        if (mounted) { setBackend("unavailable"); setError(`Windows cleaner backend is unavailable: ${String(cause)}`); }
       }
     }
     void connect();
-    return () => { mounted = false; unlisteners.forEach(unlisten => unlisten()); };
-  }, []);
+    return () => { mounted = false; unlisteners.forEach(unlisten => unlisten()); disconnectBackend(); };
+  }, [connectNonce]);
 
   const visible = useMemo(() => results.filter(result => {
     if (filter === "matched" && !["not_orphaned", "associated_with_installed"].includes(result.orphanStatus)) return false;
@@ -143,28 +146,29 @@ export default function App() {
   const former = results.filter(result => ["probable_orphan", "possibly_orphaned"].includes(result.orphanStatus)).length;
   const unknown = results.filter(result => result.orphanStatus === "unknown").length;
   const newlyMissing = history?.applications.filter(application => application.newlyMissing).length ?? 0;
+  const connected = backend === "tauri" || backend === "agent";
 
   async function start() {
     setError(""); setResults([]); setSelectedPath(null); setSummary(null); setSavedAt(null); setCurrentPath(""); setHistory(null); setRunning(true);
-    try { await invoke("start_scan"); }
+    try { await invokeBackend("start_scan"); }
     catch (cause) {
       setError(String(cause)); setRunning(false);
       try {
-        const saved = await invoke<SavedScan | null>("load_latest_scan");
+        const saved = await invokeBackend<SavedScan | null>("load_latest_scan");
         if (saved) { setApps(saved.inventory.applications); setResults(saved.results); setSummary(saved.summary); setSavedAt(saved.capturedAtUnix); }
       } catch { /* The original start error remains visible. */ }
     }
   }
 
   async function cancel() {
-    try { await invoke("cancel_scan"); }
+    try { await invokeBackend("cancel_scan"); }
     catch (cause) { setError(String(cause)); }
   }
 
   async function updateData() {
     setUpdatingData(true); setDataMessage("");
     try {
-      const status = await invoke<PublicDataStatus>("update_public_data");
+      const status = await invokeBackend<PublicDataStatus>("update_public_data");
       setPublicData(status);
       setDataMessage(status.gameDirectories || status.cleanerDirectories
         ? "Folder data updated. Refresh the scan to apply it to the directory results."
@@ -176,7 +180,7 @@ export default function App() {
   async function exportDiagnostics() {
     setExportingDiagnostics(true); setDiagnosticsMessage("");
     try {
-      const exported = await invoke<DiagnosticsExport>("export_diagnostics");
+      const exported = await invokeBackend<DiagnosticsExport>("export_diagnostics");
       setDiagnosticsMessage(`Exported ${exported.scans} retained scan${exported.scans === 1 ? "" : "s"} and ${exported.directories} directory record${exported.directories === 1 ? "" : "s"} to ${exported.path}`);
     } catch (cause) { setDiagnosticsMessage(`Diagnostics export failed: ${String(cause)}`); }
     finally { setExportingDiagnostics(false); }
@@ -190,15 +194,17 @@ export default function App() {
       <div className="sidebar-bottom"><span className="read-only-dot" /> Read-only preview <small>No files can be deleted in this version.</small></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div><div className="eyebrow">LOCAL ANALYSIS · WINDOWS 10/11</div><h1>Directory inventory</h1><p>See which application data can be linked to installed software.</p></div><div className="top-actions">{running ? <button className="secondary" onClick={cancel}>Cancel scan</button> : <button className="primary" onClick={() => void start()} disabled={!native}>{savedAt ? "Refresh scan" : "Start scan"}</button>}</div></header>
-      {!native && <div className="notice">Open this project with Tauri to scan this Windows installation. The web preview cannot access your application data.</div>}
+      <header className="topbar"><div><div className="eyebrow">LOCAL ANALYSIS · WINDOWS 10/11</div><h1>Directory inventory</h1><p>See which application data can be linked to installed software.</p></div><div className="top-actions">{running ? <button className="secondary" onClick={cancel}>Cancel scan</button> : <button className="primary" onClick={() => void start()} disabled={!connected}>{savedAt ? "Refresh scan" : "Start scan"}</button>}</div></header>
+      {backend === "connecting" && <div className="notice">Connecting to the Windows cleaner backend…</div>}
+      {backend === "agent" && <div className="notice connected">Connected to the local Rust cleaner agent. The web interface has native scan access.</div>}
+      {backend === "unavailable" && <div className="notice error notice-action"><span>Start the local Rust agent with <code>npm run agent</code>, then reconnect.</span><button className="secondary" onClick={() => { setError(""); setBackend("connecting"); setConnectNonce(value => value + 1); }}>Reconnect</button></div>}
       {savedAt && !running && <div className="notice">Saved scan from {new Date(savedAt * 1000).toLocaleString()}. Results may have changed since then; refresh when you want current data.</div>}
       {error && <div className="notice error">{error}</div>}
       {inventoryWarnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
-      <div className="public-data"><div><strong>Public folder data</strong><span>{publicData?.updatedAtUnix ? `Updated ${new Date(publicData.updatedAtUnix * 1000).toLocaleString()} · ` : "Not downloaded · "}{publicData?.gameDirectories ?? 0} game folder names · {publicData?.cleanerDirectories ?? 0} cleaner folder names</span><small>Read-only hints from <a href="https://github.com/mtkennerly/ludusavi-manifest" target="_blank" rel="noreferrer">Ludusavi</a> (MIT repository; sourced partly from PCGamingWiki) and <a href="https://github.com/MoscaDotTo/Winapp2" target="_blank" rel="noreferrer">Winapp2</a> (CC BY-SA 4.0). A path match does not prove that a whole folder is disposable.</small></div><button className="secondary" disabled={!native || updatingData || running} onClick={() => void updateData()}>{updatingData ? "Updating…" : "Update folder data"}</button></div>
+      <div className="public-data"><div><strong>Public folder data</strong><span>{publicData?.updatedAtUnix ? `Updated ${new Date(publicData.updatedAtUnix * 1000).toLocaleString()} · ` : "Not downloaded · "}{publicData?.gameDirectories ?? 0} game folder names · {publicData?.cleanerDirectories ?? 0} cleaner folder names</span><small>Read-only hints from <a href="https://github.com/mtkennerly/ludusavi-manifest" target="_blank" rel="noreferrer">Ludusavi</a> (MIT repository; sourced partly from PCGamingWiki) and <a href="https://github.com/MoscaDotTo/Winapp2" target="_blank" rel="noreferrer">Winapp2</a> (CC BY-SA 4.0). A path match does not prove that a whole folder is disposable.</small></div><button className="secondary" disabled={!connected || updatingData || running} onClick={() => void updateData()}>{updatingData ? "Updating…" : "Update folder data"}</button></div>
       {dataMessage && <div className="notice">{dataMessage}</div>}
       {publicData?.warnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
-      <div className="public-data diagnostics"><div><strong>Diagnostics export</strong><span>Privacy-reviewed JSON for troubleshooting</span><small>Contains installed application names and versions, top-level scanned directory paths, aggregate sizes and counts, classifier evidence, warnings, and up to ten complete scans. User-profile and app-data prefixes are redacted. File contents and individual filenames are not included.</small></div><button className="secondary" disabled={!native || exportingDiagnostics || running} onClick={() => void exportDiagnostics()}>{exportingDiagnostics ? "Exporting…" : "Export diagnostics"}</button></div>
+      <div className="public-data diagnostics"><div><strong>Diagnostics export</strong><span>Privacy-reviewed JSON for troubleshooting</span><small>Contains installed application names and versions, top-level scanned directory paths, aggregate sizes and counts, classifier evidence, warnings, and up to ten complete scans. User-profile and app-data prefixes are redacted. File contents and individual filenames are not included.</small></div><button className="secondary" disabled={!connected || exportingDiagnostics || running} onClick={() => void exportDiagnostics()}>{exportingDiagnostics ? "Exporting…" : "Export diagnostics"}</button></div>
       {diagnosticsMessage && <div className="notice diagnostics-message">{diagnosticsMessage}</div>}
       <section className="stats">
         <div><span>Installed apps found</span><strong>{apps.length}</strong><small>Registry and current-user MSIX</small></div>
