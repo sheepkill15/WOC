@@ -50,7 +50,7 @@ fn build_bundle(scans: &[SavedScan], status: &PublicDataStatus, app_local_data: 
     let mut bundle = json!({
         "formatVersion": 1,
         "generatedAtUnix": generated_at_unix,
-        "privacyNotice": "Contains installed application names and versions, top-level scanned directory paths, aggregate sizes and counts, classifier evidence, warnings, and up to ten completed scans. User-profile and app-local-data path prefixes are redacted. It contains no file contents and no individual filenames.",
+        "privacyNotice": "Contains installed application names and versions, top-level and positively matched nested directory paths, aggregate sizes and counts, classifier evidence, warnings, and up to ten completed scans. User-profile and app-local-data path prefixes are redacted. It contains no file contents and no individual filenames.",
         "publicFolderData": public_data,
         "scans": scans,
     });
@@ -107,6 +107,7 @@ mod tests {
             summary: ScanSummary { scanned_roots: vec![r"Local: C:\Users\Private Person\AppData\Local".into()], ..Default::default() },
             results: vec![DirectoryResult {
                 path: r"C:\Users\Private Person\AppData\Local\Example".into(), root: "Local".into(),
+                parent_path: None,
                 size_bytes: 1, file_count: 1, directory_count: 0, newest_modified_unix: None,
                 skipped_entries: 0, owner: None, owner_hint: None, ownership: "unknown".into(),
                 orphan_status: "unknown".into(), evidence: vec![],

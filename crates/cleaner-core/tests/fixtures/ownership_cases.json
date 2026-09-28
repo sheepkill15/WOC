@@ -236,5 +236,517 @@
       "orphanStatus": "unknown",
       "evidenceKinds": []
     }
+  },
+  {
+    "id": "nested-versioned-jetbrains-product",
+    "rationale": "An audited JetBrains child whose product family and version agree with the installed registration can be reported separately from its shared publisher container.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\JetBrains\\RustRover2026.2",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "rustrover",
+        "name": "RustRover 2026.2.1",
+        "publisher": "JetBrains s.r.o.",
+        "version": "262.9437.161",
+        "installLocation": "C:\\Program Files\\JetBrains\\RustRover 2026.2.1"
+      }
+    ],
+    "expected": {
+      "ownerId": "rustrover",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["nested_product_version_match"]
+    }
+  },
+  {
+    "id": "nested-versioned-google-product",
+    "rationale": "The audited Android Studio cache directory is active when its nested version extends the registered product version under Google's publisher folder.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Google\\AndroidStudio2026.1.3",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "android-studio",
+        "name": "Android Studio",
+        "publisher": "Google LLC",
+        "version": "2026.1"
+      }
+    ],
+    "expected": {
+      "ownerId": "android-studio",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["nested_product_version_match"]
+    }
+  },
+  {
+    "id": "nested-version-mismatch-negative-control",
+    "rationale": "An installed newer product family does not prove that an older version-specific directory is active or abandoned.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\JetBrains\\Rider2024.1",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "rider-current",
+        "name": "Rider 2026.2",
+        "publisher": "JetBrains s.r.o.",
+        "version": "2026.2"
+      }
+    ],
+    "expected": {
+      "ownerHint": "Rider",
+      "ownership": "product_family",
+      "orphanStatus": "unknown",
+      "evidenceKinds": ["nested_product_version_mismatch"]
+    }
+  },
+  {
+    "id": "nested-product-wrong-container-negative-control",
+    "rationale": "A version-compatible product name under an unrelated parent is not enough to establish ownership.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\UnrelatedVendor\\RustRover2026.2",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "rustrover",
+        "name": "RustRover 2026.2.1",
+        "publisher": "JetBrains s.r.o.",
+        "version": "2026.2.1"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "package-namespace-container",
+    "rationale": "A package namespace prefix can explain its top-level container without assigning the whole container to one product.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\OpenAI",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "codex-package",
+        "name": "OpenAI.Codex",
+        "packageFamilyName": "OpenAI.Codex_2p2nqsd0c76g0"
+      }
+    ],
+    "expected": {
+      "ownerHint": "OpenAI",
+      "ownership": "shared",
+      "orphanStatus": "associated_with_installed",
+      "evidenceKinds": ["vendor_or_install_segment"]
+    }
+  },
+  {
+    "id": "nested-package-namespace-product",
+    "rationale": "An exact parent-child reconstruction of a dotted package product is conservative active-product evidence.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\OpenAI\\Codex",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "codex-package",
+        "name": "OpenAI.Codex",
+        "packageFamilyName": "OpenAI.Codex_2p2nqsd0c76g0"
+      }
+    ],
+    "expected": {
+      "ownerId": "codex-package",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["nested_package_namespace_match"]
+    }
+  },
+  {
+    "id": "ordinary-name-concatenation-negative-control",
+    "rationale": "Arbitrary parent and child concatenation must not match an application unless the installed product uses an explicit dotted package namespace.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Note\\Pad",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "notepad-package",
+        "name": "Notepad",
+        "packageFamilyName": "Notepad_8wekyb3d8bbwe"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "publisher-cloud-container",
+    "rationale": "An audited publisher name plus the explicit Cloud container suffix is vendor/shared evidence, not exclusive ownership.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Roland Cloud",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "zenology",
+        "name": "Roland ZENOLOGY",
+        "publisher": "Roland",
+        "version": "2.0.7"
+      }
+    ],
+    "expected": {
+      "ownerHint": "Roland",
+      "ownership": "shared",
+      "orphanStatus": "associated_with_installed",
+      "evidenceKinds": ["vendor_or_install_segment"]
+    }
+  },
+  {
+    "id": "nested-publisher-product",
+    "rationale": "An exact product remainder under its audited publisher Cloud container can be linked to the installed product.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Roland Cloud\\ZENOLOGY",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "zenology",
+        "name": "Roland ZENOLOGY",
+        "publisher": "Roland",
+        "version": "2.0.7"
+      }
+    ],
+    "expected": {
+      "ownerId": "zenology",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["nested_vendor_product_match"]
+    }
+  },
+  {
+    "id": "nested-product-wrong-cloud-negative-control",
+    "rationale": "An exact product child under another vendor's Cloud folder must not inherit ownership from the product name alone.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\Other Cloud\\ZENOLOGY",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "zenology",
+        "name": "Roland ZENOLOGY",
+        "publisher": "Roland",
+        "version": "2.0.7"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "reverse-domain-product-splice",
+    "rationale": "The identifier payload exactly equals the installed product name after removing its explicit version suffix.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\com.splice.INSTRUMENT",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "splice-instrument",
+        "name": "Splice INSTRUMENT version 2.0.15",
+        "publisher": "Distributed Creation Inc",
+        "version": "2.0.15"
+      }
+    ],
+    "expected": {
+      "ownerId": "splice-instrument",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["reverse_domain_product_match"]
+    }
+  },
+  {
+    "id": "reverse-domain-product-spitfire",
+    "rationale": "A two-component reverse-domain identifier can identify a product when its complete payload is an exact normalized product name.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\com.spitfireaudio",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "spitfire-audio",
+        "name": "Spitfire Audio version 3.4.18",
+        "publisher": "Spitfire Audio Holdings Ltd",
+        "version": "3.4.18"
+      }
+    ],
+    "expected": {
+      "ownerId": "spitfire-audio",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["reverse_domain_product_match"]
+    }
+  },
+  {
+    "id": "reverse-domain-vendor-shared",
+    "rationale": "An exact vendor segment is useful shared evidence, but an unknown trailing identifier cannot be assigned to Adobe Acrobat.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\com.adobe.dunamis",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "adobe-acrobat",
+        "name": "Adobe Acrobat (64-bit)",
+        "publisher": "Adobe",
+        "version": "25.001.20474"
+      }
+    ],
+    "expected": {
+      "ownerHint": "Adobe",
+      "ownership": "shared",
+      "orphanStatus": "associated_with_installed",
+      "evidenceKinds": ["reverse_domain_vendor_match"]
+    }
+  },
+  {
+    "id": "reverse-domain-placeholder-negative-control",
+    "rationale": "Placeholder vendor segments such as example must remain unknown even if an unrelated installed product contains similar words.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\com.example",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "example-suite",
+        "name": "Example Suite",
+        "publisher": "Example Inc"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "reverse-domain-unapproved-prefix-negative-control",
+    "rationale": "A dotted name with an unrecognized namespace prefix must not gain ownership from concatenation alone.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\local.splice.INSTRUMENT",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "splice-instrument",
+        "name": "Splice INSTRUMENT version 2.0.15",
+        "publisher": "Distributed Creation Inc",
+        "version": "2.0.15"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "reverse-domain-partial-product-negative-control",
+    "rationale": "Sharing one product token is insufficient when the complete reverse-domain payload does not match the installed product and the vendor segment differs from its publisher.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\com.splice.other",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "splice-instrument",
+        "name": "Splice INSTRUMENT version 2.0.15",
+        "publisher": "Distributed Creation Inc",
+        "version": "2.0.15"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "installed-product-updater-alias",
+    "rationale": "An explicit updater suffix can be removed only when the remaining complete name exactly matches an installed product.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\anime-relay-updater",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "anime-relay",
+        "name": "Anime Relay 0.3.4",
+        "version": "0.3.4"
+      }
+    ],
+    "expected": {
+      "ownerId": "anime-relay",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["updater_product_match"]
+    }
+  },
+  {
+    "id": "updater-publisher-only-negative-control",
+    "rationale": "An updater folder must not be linked merely because its base matches another application's publisher.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\lm-studio-updater",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "bionic",
+        "name": "Bionic 1.1.6+3",
+        "publisher": "LM Studio",
+        "version": "1.1.6+3"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "updater-suffix-only-negative-control",
+    "rationale": "The updater suffix alone is never ownership evidence when no installed product has the exact base name.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\cache-updater",
+    "root": "Local",
+    "applications": [
+      {
+        "id": "unrelated",
+        "name": "Unrelated Cache Tool"
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "installed-launcher-ux-component",
+    "rationale": "The audited UX suffix links Riot Client UX state only because the entire remaining name exactly matches the installed launcher.",
+    "path": "C:\\Users\\Test\\AppData\\Roaming\\riot-client-ux",
+    "root": "Roaming",
+    "applications": [
+      {
+        "id": "riot-client",
+        "name": "Riot Client",
+        "publisher": "Riot Games, Inc"
+      }
+    ],
+    "expected": {
+      "ownerId": "riot-client",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["launcher_component_match"]
+    }
+  },
+  {
+    "id": "installed-launcher-components-directory",
+    "rationale": "Battle.net component storage is associated only through the exact product base plus the explicit components suffix.",
+    "path": "C:\\ProgramData\\Battle.net_components",
+    "root": "ProgramData",
+    "applications": [
+      {
+        "id": "battle-net",
+        "name": "Battle.net",
+        "publisher": "Blizzard Entertainment"
+      }
+    ],
+    "expected": {
+      "ownerId": "battle-net",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["launcher_component_match"]
+    }
+  },
+  {
+    "id": "installed-persistent-component-directory",
+    "rationale": "Parsec persistent state is associated through an exact product base and the audited Persistent suffix.",
+    "path": "C:\\ProgramData\\ParsecPersistent",
+    "root": "ProgramData",
+    "applications": [
+      {
+        "id": "parsec",
+        "name": "Parsec",
+        "publisher": "Parsec Cloud Inc."
+      }
+    ],
+    "expected": {
+      "ownerId": "parsec",
+      "ownership": "likely",
+      "orphanStatus": "not_orphaned",
+      "evidenceKinds": ["launcher_component_match"]
+    }
+  },
+  {
+    "id": "component-substring-negative-control",
+    "rationale": "A component suffix is not removed when additional unmatched words remain in the base.",
+    "path": "C:\\ProgramData\\parsec-helper-persistent",
+    "root": "ProgramData",
+    "applications": [
+      {
+        "id": "parsec",
+        "name": "Parsec",
+        "publisher": "Parsec Cloud Inc."
+      }
+    ],
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
+  },
+  {
+    "id": "known-windows-update-storage",
+    "rationale": "SoftwareDistribution is Windows-managed update state and must never appear as an orphan merely because no application owns it.",
+    "path": "C:\\ProgramData\\SoftwareDistribution",
+    "root": "ProgramData",
+    "expected": {
+      "ownerHint": "Windows Update storage",
+      "ownership": "known_location",
+      "orphanStatus": "known_application_data",
+      "evidenceKinds": ["known_location"]
+    }
+  },
+  {
+    "id": "known-update-orchestrator-storage",
+    "rationale": "USOShared is state for the Windows Update Orchestrator service, not unknown application data.",
+    "path": "C:\\ProgramData\\USOShared",
+    "root": "ProgramData",
+    "expected": {
+      "ownerHint": "Windows Update Orchestrator",
+      "ownership": "known_location",
+      "orphanStatus": "known_application_data",
+      "evidenceKinds": ["known_location"]
+    }
+  },
+  {
+    "id": "known-windows-health-storage",
+    "rationale": "The whesvc folder is managed by the Windows Health and Optimized Experiences service and must be preserved.",
+    "path": "C:\\ProgramData\\Whesvc",
+    "root": "ProgramData",
+    "expected": {
+      "ownerHint": "Windows Health and Optimized Experiences",
+      "ownership": "known_location",
+      "orphanStatus": "known_application_data",
+      "evidenceKinds": ["known_location"]
+    }
+  },
+  {
+    "id": "known-openssh-machine-data",
+    "rationale": "Machine-wide OpenSSH configuration may contain private host keys and is preservation-critical system data.",
+    "path": "C:\\ProgramData\\ssh",
+    "root": "ProgramData",
+    "expected": {
+      "ownerHint": "OpenSSH machine configuration",
+      "ownership": "known_location",
+      "orphanStatus": "known_application_data",
+      "evidenceKinds": ["known_location"]
+    }
+  },
+  {
+    "id": "known-software-identification-records",
+    "rationale": "Registration identifier folders contain SWID inventory records; their presence is not application-leftover evidence.",
+    "path": "C:\\ProgramData\\regid.2010-01.com.zerotier",
+    "root": "ProgramData",
+    "expected": {
+      "ownerHint": "Software identification records",
+      "ownership": "known_location",
+      "orphanStatus": "known_application_data",
+      "evidenceKinds": ["known_location"]
+    }
+  },
+  {
+    "id": "system-name-wrong-root-negative-control",
+    "rationale": "A user application may reuse a system-looking name, so ProgramData recognition must not leak into AppData roots.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\SoftwareDistribution",
+    "root": "Local",
+    "expected": {
+      "ownership": "unknown",
+      "orphanStatus": "unknown",
+      "evidenceKinds": []
+    }
   }
 ]

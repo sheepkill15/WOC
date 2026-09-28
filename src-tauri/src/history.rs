@@ -111,6 +111,7 @@ mod tests {
     fn scan(time: u64, installed: Vec<Application>, result_owner: Option<Application>) -> SavedScan {
         let results = result_owner.into_iter().map(|owner| DirectoryResult {
             path: r"C:\Users\Test\AppData\Roaming\Example App".into(), root: "Roaming".into(),
+            parent_path: None,
             size_bytes: 4096, file_count: 2, directory_count: 1, newest_modified_unix: None,
             skipped_entries: 0, owner: Some(owner), owner_hint: None,
             ownership: "historical_confirmed".into(), orphan_status: "probable_orphan".into(),
@@ -156,6 +157,7 @@ mod tests {
         let mut current = scan(200, vec![], None);
         current.results.push(DirectoryResult {
             path: r"C:\Users\Test\AppData\Roaming\Image-Line".into(), root: "Roaming".into(),
+            parent_path: None,
             size_bytes: 10, file_count: 1, directory_count: 0, newest_modified_unix: None,
             skipped_entries: 0, owner: None, owner_hint: Some("Image-Line".into()),
             ownership: "known_location".into(), orphan_status: "possibly_orphaned".into(), evidence: vec![],
