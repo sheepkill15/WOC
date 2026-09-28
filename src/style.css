@@ -2,3 +2,6 @@
 .scan-coverage{margin-top:12px;color:#8293aa;font-size:11px}
 .badge.former{background:#4b3a27;color:#ffd59b}
 .badge.known{background:#253a52;color:#a8cfff}
+.public-data{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:18px;padding:15px 17px;background:#162235;border:1px solid #344562;border-radius:10px}
+.public-data>div{min-width:0}.public-data strong,.public-data span,.public-data small{display:block}.public-data strong{font-size:13px}.public-data span{font-size:12px;color:#b6c7e0;margin-top:5px}.public-data small{font-size:11px;color:#8fa3bf;line-height:1.5;margin-top:5px}.public-data a{color:#a9bbff}.secondary:disabled{opacity:.45;cursor:default}
+@media(max-width:680px){.public-data{align-items:flex-start;flex-direction:column}.public-data button{width:100%}}

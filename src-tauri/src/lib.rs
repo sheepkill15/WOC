@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod storage;
+mod public_data;
 
 #[derive(Default)]
 struct ScanState {
@@ -37,6 +38,19 @@ fn load_latest_scan(app: AppHandle) -> Result<Option<storage::SavedScan>, String
 }
 
 #[tauri::command]
+fn public_data_status(app: AppHandle) -> Result<public_data::PublicDataStatus, String> {
+    let directory = app.path().app_local_data_dir().map_err(|err| err.to_string())?;
+    public_data::load(&directory).map(|(_, status)| status)
+}
+
+#[tauri::command]
+async fn update_public_data(app: AppHandle) -> Result<public_data::PublicDataStatus, String> {
+    let directory = app.path().app_local_data_dir().map_err(|err| err.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || public_data::update(&directory))
+        .await.map_err(|err| err.to_string())?
+}
+
+#[tauri::command]
 fn start_scan(app: AppHandle, state: State<'_, ScanState>) -> Result<(), String> {
     let cancel = Arc::new(AtomicBool::new(false));
     {
@@ -64,8 +78,15 @@ fn start_scan(app: AppHandle, state: State<'_, ScanState>) -> Result<(), String>
             .map(|scan| scan.results.iter().map(|result| (result.path.to_lowercase(), result)).collect())
             .unwrap_or_default();
         let excluded_paths = local_data_dir.as_ref().map(|path| vec![path.clone()]).unwrap_or_default();
+        let (knowledge, public_data_warning) = match local_data_dir.as_ref() {
+            Ok(directory) => match public_data::load(directory) {
+                Ok((knowledge, _)) => (knowledge, None),
+                Err(error) => (Default::default(), Some(error)),
+            },
+            Err(_) => (Default::default(), None),
+        };
         let mut results = Vec::new();
-        let summary = cleaner_core::scan(
+        let mut summary = cleaner_core::scan(
             &inventory.applications,
             &excluded_paths,
             &cancel,
@@ -77,11 +98,13 @@ fn start_scan(app: AppHandle, state: State<'_, ScanState>) -> Result<(), String>
                         previous_by_path.get(&path_key).copied(),
                     );
                 }
+                knowledge.annotate(&mut result);
                 let _ = app.emit("scan-result", &result);
                 results.push(result);
             },
             |path| { let _ = app.emit("scan-progress", ProgressEvent { path }); },
         );
+        if let Some(warning) = public_data_warning { summary.warnings.push(warning); }
         let (saved_at_unix, save_error) = if summary.canceled {
             (None, None)
         } else if summary.scanned_roots.len() != 4 || !inventory.warnings.is_empty() {
@@ -114,7 +137,7 @@ fn cancel_scan(state: State<'_, ScanState>) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(ScanState::default())
-        .invoke_handler(tauri::generate_handler![installed_applications, load_latest_scan, start_scan, cancel_scan])
+        .invoke_handler(tauri::generate_handler![installed_applications, load_latest_scan, public_data_status, update_public_data, start_scan, cancel_scan])
         .run(tauri::generate_context!())
         .expect("failed to start Windows Orphan Cleaner");
 }

@@ -13,6 +13,7 @@ type DirectoryResult = {
 type ScanSummary = { directories: number; bytes: number; skippedEntries: number; canceled: boolean; scannedRoots: string[]; warnings: string[] };
 type SavedScan = { capturedAtUnix: number; inventory: Inventory; summary: ScanSummary; results: DirectoryResult[] };
 type ScanFinishedEvent = { summary: ScanSummary; savedAtUnix: number | null; saveError: string | null };
+type PublicDataStatus = { updatedAtUnix: number | null; gameDirectories: number; cleanerDirectories: number; warnings: string[] };
 const native = "__TAURI_INTERNALS__" in window;
 
 function formatBytes(bytes: number): string {
@@ -50,6 +51,9 @@ export default function App() {
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<"all" | "matched" | "known" | "former" | "unknown">("all");
   const [query, setQuery] = useState("");
+  const [publicData, setPublicData] = useState<PublicDataStatus | null>(null);
+  const [updatingData, setUpdatingData] = useState(false);
+  const [dataMessage, setDataMessage] = useState("");
 
   useEffect(() => {
     if (!native) return;
@@ -87,6 +91,10 @@ export default function App() {
           if (mounted) { setApps(event.payload.applications); setInventoryWarnings(event.payload.warnings); }
         }));
         let saved: SavedScan | null = null;
+        try {
+          const status = await invoke<PublicDataStatus>("public_data_status");
+          if (mounted) setPublicData(status);
+        } catch (cause) { if (mounted) setDataMessage(`Public folder data could not be loaded: ${String(cause)}`); }
         try { saved = await invoke<SavedScan | null>("load_latest_scan"); }
         catch (cause) { if (mounted) setError(`Saved scan could not be loaded: ${String(cause)}`); }
         if (saved) {
@@ -135,6 +143,18 @@ export default function App() {
     catch (cause) { setError(String(cause)); }
   }
 
+  async function updateData() {
+    setUpdatingData(true); setDataMessage("");
+    try {
+      const status = await invoke<PublicDataStatus>("update_public_data");
+      setPublicData(status);
+      setDataMessage(status.gameDirectories || status.cleanerDirectories
+        ? "Folder data updated. Refresh the scan to apply it to the directory results."
+        : "No folder data could be downloaded. The scan can still run without it.");
+    } catch (cause) { setDataMessage(`Folder data update failed: ${String(cause)}`); }
+    finally { setUpdatingData(false); }
+  }
+
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark">◎</div><div><strong>Orphan Cleaner</strong><span>Windows storage explorer</span></div></div>
@@ -148,6 +168,9 @@ export default function App() {
       {savedAt && !running && <div className="notice">Saved scan from {new Date(savedAt * 1000).toLocaleString()}. Results may have changed since then; refresh when you want current data.</div>}
       {error && <div className="notice error">{error}</div>}
       {inventoryWarnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
+      <div className="public-data"><div><strong>Public folder data</strong><span>{publicData?.updatedAtUnix ? `Updated ${new Date(publicData.updatedAtUnix * 1000).toLocaleString()} · ` : "Not downloaded · "}{publicData?.gameDirectories ?? 0} game folder names · {publicData?.cleanerDirectories ?? 0} cleaner folder names</span><small>Read-only hints from <a href="https://github.com/mtkennerly/ludusavi-manifest" target="_blank" rel="noreferrer">Ludusavi</a> (MIT repository; sourced partly from PCGamingWiki) and <a href="https://github.com/MoscaDotTo/Winapp2" target="_blank" rel="noreferrer">Winapp2</a> (CC BY-SA 4.0). A path match does not prove that a whole folder is disposable.</small></div><button className="secondary" disabled={!native || updatingData || running} onClick={() => void updateData()}>{updatingData ? "Updating…" : "Update folder data"}</button></div>
+      {dataMessage && <div className="notice">{dataMessage}</div>}
+      {publicData?.warnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
       <section className="stats">
         <div><span>Installed apps found</span><strong>{apps.length}</strong><small>Registry and current-user MSIX</small></div>
         <div><span>Directories inspected</span><strong>{results.length}</strong><small>{running ? "Scan in progress" : summary ? summary.canceled ? "Scan canceled" : "Scan complete" : "Awaiting scan"}</small></div>
@@ -160,8 +183,8 @@ export default function App() {
       {summary && <div className="scan-coverage" title={summary.scannedRoots.join("\n")}>Scanned roots: {summary.scannedRoots.map(root => root.split(": ")[0]).join(", ") || "none"}{summary.canceled ? " (partial scan)" : ""}</div>}
       <div className="section-heading"><div><h2>Application data</h2><p>Unmatched means ownership is unknown. It does not mean safe to remove.</p></div></div>
       <div className="toolbar"><div className="tabs"><button className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>All <span>{results.length}</span></button><button className={filter === "matched" ? "selected" : ""} onClick={() => setFilter("matched")}>Installed <span>{matched}</span></button><button className={filter === "known" ? "selected" : ""} onClick={() => setFilter("known")}>Known data <span>{known}</span></button><button className={filter === "former" ? "selected" : ""} onClick={() => setFilter("former")}>Former app data <span>{former}</span></button><button className={filter === "unknown" ? "selected" : ""} onClick={() => setFilter("unknown")}>Unknown <span>{unknown}</span></button></div><input aria-label="Search directories" placeholder="Search directories or applications" value={query} onChange={event => setQuery(event.target.value)} /></div>
-      <div className="content-grid"><div className="table-wrap"><table><thead><tr><th>Directory</th><th>Size</th><th>Probable owner</th></tr></thead><tbody>{visible.map(result => <tr key={result.path} className={selectedPath === result.path ? "selected-row" : ""} onClick={() => setSelectedPath(result.path)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPath(result.path); } }} tabIndex={0} aria-selected={selectedPath === result.path}><td><strong>{shortPath(result.path)}</strong><small title={result.path}>{result.path}</small></td><td>{formatBytes(result.sizeBytes)}</td><td><span className="owner-name">{result.owner?.name ?? result.ownerHint ?? (result.ownership === "shared" ? "Shared / vendor data" : "Unresolved")}</span><span className={`badge ${assessment(result).className}`}>{assessment(result).label}</span></td></tr>)}</tbody></table>{visible.length === 0 && <div className="empty">{results.length === 0 ? "Start a scan to inspect application data directories." : "No directories match these filters."}</div>}</div>
-      <aside className="details">{selected ? <><div className="details-head"><span>DIRECTORY DETAILS</span><h3>{shortPath(selected.path)}</h3><p>{selected.path}</p></div><div className="detail-grid"><div><span>Size</span><strong>{formatBytes(selected.sizeBytes)}</strong></div><div><span>Files</span><strong>{selected.fileCount.toLocaleString()}</strong></div><div><span>Subfolders</span><strong>{selected.directoryCount.toLocaleString()}</strong></div><div><span>Source</span><strong>{selected.root}</strong></div></div><h4>Ownership assessment</h4><p>{["probable_orphan", "possibly_orphaned"].includes(selected.orphanStatus) ? selected.owner ? `Previously associated with ${selected.owner.name}. That app is absent from the current inventory. This may still contain valuable data.` : `${selected.ownerHint ?? "This application"} is known application data, but no matching installed registration was found. Launcher-managed or portable software may still use it.` : selected.orphanStatus === "associated_with_installed" ? "The folder name is associated with installed software, but a single owner cannot be established. Its contents may include older or unrelated data." : selected.orphanStatus === "known_application_data" ? "This is a recognized Windows or development-tool data location. Its current owner and cleanup safety have not been established." : selected.owner ? `Associated with installed application ${selected.owner.name}.` : "No reliable owner identified. This directory is not classified as an orphan."}</p><h4>Evidence</h4>{selected.evidence.length ? selected.evidence.map((item, index) => <div className="evidence" key={index}><span>{item.strength}</span><p>{item.description}</p></div>) : <p className="muted">No ownership evidence yet.</p>}{selected.skippedEntries > 0 && <p className="detail-warning">{selected.skippedEntries} entries were skipped; the displayed size may be incomplete.</p>}<div className="detail-foot">Read only · No cleanup actions available</div></> : <div className="detail-empty"><div>◎</div><h3>Select a directory</h3><p>Review the evidence behind each ownership assessment.</p></div>}</aside></div>
+      <div className="content-grid"><div className="table-wrap"><table><thead><tr><th>Directory</th><th>Size</th><th>Probable owner</th></tr></thead><tbody>{visible.map(result => <tr key={result.path} className={selectedPath === result.path ? "selected-row" : ""} onClick={() => setSelectedPath(result.path)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPath(result.path); } }} tabIndex={0} aria-selected={selectedPath === result.path}><td><strong>{shortPath(result.path)}</strong><small title={result.path}>{result.path}</small></td><td>{formatBytes(result.sizeBytes)}</td><td><span className="owner-name">{result.owner?.name ?? result.ownerHint ?? (result.ownership === "shared" ? result.path.split("\\").pop() || "Shared application data" : "Unresolved")}</span><span className={`badge ${assessment(result).className}`}>{assessment(result).label}</span></td></tr>)}</tbody></table>{visible.length === 0 && <div className="empty">{results.length === 0 ? "Start a scan to inspect application data directories." : "No directories match these filters."}</div>}</div>
+      <aside className="details">{selected ? <><div className="details-head"><span>DIRECTORY DETAILS</span><h3>{shortPath(selected.path)}</h3><p>{selected.path}</p></div><div className="detail-grid"><div><span>Size</span><strong>{formatBytes(selected.sizeBytes)}</strong></div><div><span>Files</span><strong>{selected.fileCount.toLocaleString()}</strong></div><div><span>Subfolders</span><strong>{selected.directoryCount.toLocaleString()}</strong></div><div><span>Source</span><strong>{selected.root}</strong></div></div><h4>Ownership assessment</h4><p>{["probable_orphan", "possibly_orphaned"].includes(selected.orphanStatus) ? selected.owner ? `Previously associated with ${selected.owner.name}. That app is absent from the current inventory. This may still contain valuable data.` : `${selected.ownerHint ?? "This application"} is known application data, but no matching installed registration was found. Launcher-managed or portable software may still use it.` : selected.orphanStatus === "associated_with_installed" ? "The folder name is associated with installed software, but a single owner cannot be established. Its contents may include older or unrelated data." : selected.orphanStatus === "known_application_data" ? "This is a recognized application or system data location. Its current owner and cleanup safety have not been established." : selected.owner ? `Associated with installed application ${selected.owner.name}.` : "No reliable owner identified. This directory is not classified as an orphan."}</p>{selected.evidence.some(item => item.kind === "ludusavi_game_data") && <p className="detail-warning">This folder may contain valuable game data such as saves or settings. Check the exact files before removing anything.</p>}<h4>Evidence</h4>{selected.evidence.length ? selected.evidence.map((item, index) => <div className="evidence" key={index}><span>{item.strength}</span><p>{item.description}</p></div>) : <p className="muted">No ownership evidence yet.</p>}{selected.skippedEntries > 0 && <p className="detail-warning">{selected.skippedEntries} entries were skipped; the displayed size may be incomplete.</p>}<div className="detail-foot">Read only · No cleanup actions available</div></> : <div className="detail-empty"><div>◎</div><h3>Select a directory</h3><p>Review the evidence behind each ownership assessment.</p></div>}</aside></div>
     </main>
   </div>;
 }

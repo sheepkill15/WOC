@@ -14,6 +14,7 @@ use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize,
 use windows::Win32::UI::Shell::{SHGetKnownFolderPath, KF_FLAG_DEFAULT, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow, FOLDERID_ProgramData, FOLDERID_RoamingAppData};
 
 mod known_locations;
+pub mod public_data;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -429,6 +430,20 @@ fn nested_installed_owner(path: &Path, apps: &[Application]) -> Option<Applicati
     (matches.len() == 1).then(|| (*matches[0]).clone())
 }
 
+fn shared_vendor_hint(path: &Path, apps: &[Application]) -> Option<String> {
+    let folder = path.file_name()?.to_string_lossy().into_owned();
+    let normalized = normalize_name(&folder);
+    let matching_publishers: Vec<&str> = apps.iter().filter_map(|app| app.publisher.as_deref())
+        .filter(|publisher| normalize_name(publisher) == normalized || vendor_name(publisher) == normalized)
+        .collect();
+    let distinct: HashSet<String> = matching_publishers.iter().map(|publisher| normalize_name(publisher)).collect();
+    if distinct.len() == 1 {
+        Some(matching_publishers[0].to_owned())
+    } else {
+        Some(folder)
+    }
+}
+
 fn enrich_directory(result: &mut DirectoryResult, apps: &[Application]) {
     if result.orphan_status == "associated_with_installed"
         && Path::new(&result.path).file_name().is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("TFT"))
@@ -453,6 +468,9 @@ fn enrich_directory(result: &mut DirectoryResult, apps: &[Application]) {
             result.orphan_status = "not_orphaned".into();
             return;
         }
+    }
+    if result.orphan_status == "associated_with_installed" && result.owner_hint.is_none() {
+        result.owner_hint = shared_vendor_hint(Path::new(&result.path), apps);
     }
     if result.orphan_status != "unknown" { return; }
     let Some(name) = Path::new(&result.path).file_name() else { return; };
@@ -680,11 +698,16 @@ mod tests {
         app.name = "NVIDIA App 11.0.9.251".into();
         app.publisher = Some("NVIDIA Corporation".into());
         let (owner, ownership, status, evidence) = resolve_owner(
-            Path::new(r"C:\ProgramData\NVIDIA Corporation"), &[driver, app]);
+            Path::new(r"C:\ProgramData\NVIDIA Corporation"), &[driver.clone(), app.clone()]);
         assert!(owner.is_none());
         assert_eq!(ownership, "shared");
         assert_eq!(status, "associated_with_installed");
         assert_eq!(evidence[0].kind, "vendor_or_install_segment");
+        let mut result = example_result(None, &ownership, &status);
+        result.path = r"C:\ProgramData\NVIDIA Corporation".into();
+        enrich_directory(&mut result, &[driver, app]);
+        assert_eq!(result.owner_hint.as_deref(), Some("NVIDIA Corporation"));
+        assert_eq!(result.orphan_status, "associated_with_installed");
     }
 
     #[test]
@@ -697,6 +720,7 @@ mod tests {
         assert!(owner.is_none());
         assert_eq!(ownership, "shared");
         assert_eq!(status, "associated_with_installed");
+        assert_eq!(shared_vendor_hint(Path::new(r"C:\Users\Test\AppData\Local\BraveSoftware"), &[]).as_deref(), Some("BraveSoftware"));
     }
 
     #[test]
