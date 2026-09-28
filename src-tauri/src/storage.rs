@@ -1,5 +1,5 @@
 use cleaner_core::{DirectoryResult, Inventory, ScanSummary};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,13 +71,7 @@ fn save_to_connection(conn: &mut Connection, scan: &SavedScan) -> Result<(), Str
     transaction.commit().map_err(|err| err.to_string())
 }
 
-fn load_from_connection(conn: &Connection) -> Result<Option<SavedScan>, String> {
-    let row: Option<(i64, i64, String, String)> = conn.query_row(
-        "SELECT id, captured_at_unix, inventory_json, summary_json FROM scan_sessions ORDER BY id DESC LIMIT 1",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).optional().map_err(|err| err.to_string())?;
-    let Some((id, captured_at, inventory_json, summary_json)) = row else { return Ok(None); };
+fn load_scan(conn: &Connection, id: i64, captured_at: i64, inventory_json: String, summary_json: String) -> Result<SavedScan, String> {
     let mut statement = conn.prepare("SELECT result_json FROM scan_results WHERE session_id = ?1 ORDER BY path")
         .map_err(|err| err.to_string())?;
     let json_rows = statement.query_map([id], |row| row.get::<_, String>(0))
@@ -87,12 +81,33 @@ fn load_from_connection(conn: &Connection) -> Result<Option<SavedScan>, String> 
         let json = json.map_err(|err| err.to_string())?;
         results.push(serde_json::from_str(&json).map_err(|err| format!("Saved result is unreadable: {err}"))?);
     }
-    Ok(Some(SavedScan {
+    Ok(SavedScan {
         captured_at_unix: captured_at as u64,
         inventory: serde_json::from_str(&inventory_json).map_err(|err| format!("Saved inventory is unreadable: {err}"))?,
         summary: serde_json::from_str(&summary_json).map_err(|err| format!("Saved summary is unreadable: {err}"))?,
         results,
-    }))
+    })
+}
+
+fn load_recent_from_connection(conn: &Connection, limit: usize) -> Result<Vec<SavedScan>, String> {
+    let mut statement = conn.prepare(
+        "SELECT id, captured_at_unix, inventory_json, summary_json FROM scan_sessions ORDER BY id DESC LIMIT ?1"
+    ).map_err(|err| err.to_string())?;
+    let rows = statement.query_map([limit as i64], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+    }).map_err(|err| err.to_string())?;
+    let mut metadata = Vec::new();
+    for row in rows {
+        metadata.push(row.map_err(|err| err.to_string())?);
+    }
+    drop(statement);
+    metadata.into_iter().map(|(id, captured_at, inventory, summary)| {
+        load_scan(conn, id, captured_at, inventory, summary)
+    }).collect()
+}
+
+fn load_from_connection(conn: &Connection) -> Result<Option<SavedScan>, String> {
+    Ok(load_recent_from_connection(conn, 1)?.into_iter().next())
 }
 
 pub fn save(path: &Path, inventory: Inventory, summary: ScanSummary, results: Vec<DirectoryResult>) -> Result<u64, String> {
@@ -107,6 +122,11 @@ pub fn save(path: &Path, inventory: Inventory, summary: ScanSummary, results: Ve
 pub fn load_latest(path: &Path) -> Result<Option<SavedScan>, String> {
     let conn = open_db(path)?;
     load_from_connection(&conn)
+}
+
+pub fn load_recent(path: &Path, limit: usize) -> Result<Vec<SavedScan>, String> {
+    let conn = open_db(path)?;
+    load_recent_from_connection(&conn, limit)
 }
 
 #[cfg(test)]
@@ -135,6 +155,8 @@ mod tests {
         assert_eq!(loaded.captured_at_unix, 11);
         assert_eq!(loaded.results.len(), 1);
         assert_eq!(loaded.results[0].path, r"C:\Test\App11");
+        let recent = load_recent_from_connection(&conn, 3).unwrap();
+        assert_eq!(recent.iter().map(|scan| scan.captured_at_unix).collect::<Vec<_>>(), [11, 10, 9]);
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM scan_sessions", [], |row| row.get(0)).unwrap();
         assert_eq!(count, 10);
         let result_count: i64 = conn.query_row("SELECT COUNT(*) FROM scan_results", [], |row| row.get(0)).unwrap();

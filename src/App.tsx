@@ -14,6 +14,13 @@ type ScanSummary = { directories: number; bytes: number; skippedEntries: number;
 type SavedScan = { capturedAtUnix: number; inventory: Inventory; summary: ScanSummary; results: DirectoryResult[] };
 type ScanFinishedEvent = { summary: ScanSummary; savedAtUnix: number | null; saveError: string | null };
 type PublicDataStatus = { updatedAtUnix: number | null; gameDirectories: number; cleanerDirectories: number; warnings: string[] };
+type HistoricalDirectory = { path: string; root: string; sizeBytes: number; orphanStatus: string };
+type HistoricalApplication = {
+  application: Application; lastSeenAtUnix: number | null; firstMissingAtUnix: number | null;
+  newlyMissing: boolean; remainingBytes: number; confidence: "probable" | "possible"; directories: HistoricalDirectory[];
+};
+type HistoryReport = { completeScans: number; currentScanAtUnix: number | null; applications: HistoricalApplication[] };
+type DiagnosticsExport = { path: string; scans: number; directories: number };
 const native = "__TAURI_INTERNALS__" in window;
 
 function formatBytes(bytes: number): string {
@@ -54,6 +61,9 @@ export default function App() {
   const [publicData, setPublicData] = useState<PublicDataStatus | null>(null);
   const [updatingData, setUpdatingData] = useState(false);
   const [dataMessage, setDataMessage] = useState("");
+  const [history, setHistory] = useState<HistoryReport | null>(null);
+  const [exportingDiagnostics, setExportingDiagnostics] = useState(false);
+  const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
 
   useEffect(() => {
     if (!native) return;
@@ -82,8 +92,11 @@ export default function App() {
           setCurrentPath("");
           if (event.payload.saveError) setError(event.payload.saveError);
           if (event.payload.savedAtUnix !== null || event.payload.summary.canceled || event.payload.saveError) {
-            void invoke<SavedScan | null>("load_latest_scan")
-              .then(scan => { if (mounted && scan) showSaved(scan); })
+            void Promise.all([
+              invoke<SavedScan | null>("load_latest_scan"),
+              invoke<HistoryReport>("load_history_report"),
+            ])
+              .then(([scan, report]) => { if (mounted) { if (scan) showSaved(scan); setHistory(report); } })
               .catch(cause => { if (mounted) setError(String(cause)); });
           }
         }));
@@ -99,6 +112,10 @@ export default function App() {
         catch (cause) { if (mounted) setError(`Saved scan could not be loaded: ${String(cause)}`); }
         if (saved) {
           if (mounted) showSaved(saved);
+          try {
+            const report = await invoke<HistoryReport>("load_history_report");
+            if (mounted) setHistory(report);
+          } catch (cause) { if (mounted) setError(`Historical observations could not be loaded: ${String(cause)}`); }
         } else {
           const inventory = await invoke<Inventory>("installed_applications");
           if (mounted) { setApps(inventory.applications); setInventoryWarnings(inventory.warnings); }
@@ -125,9 +142,10 @@ export default function App() {
   const known = results.filter(result => result.orphanStatus === "known_application_data").length;
   const former = results.filter(result => ["probable_orphan", "possibly_orphaned"].includes(result.orphanStatus)).length;
   const unknown = results.filter(result => result.orphanStatus === "unknown").length;
+  const newlyMissing = history?.applications.filter(application => application.newlyMissing).length ?? 0;
 
   async function start() {
-    setError(""); setResults([]); setSelectedPath(null); setSummary(null); setSavedAt(null); setCurrentPath(""); setRunning(true);
+    setError(""); setResults([]); setSelectedPath(null); setSummary(null); setSavedAt(null); setCurrentPath(""); setHistory(null); setRunning(true);
     try { await invoke("start_scan"); }
     catch (cause) {
       setError(String(cause)); setRunning(false);
@@ -155,6 +173,15 @@ export default function App() {
     finally { setUpdatingData(false); }
   }
 
+  async function exportDiagnostics() {
+    setExportingDiagnostics(true); setDiagnosticsMessage("");
+    try {
+      const exported = await invoke<DiagnosticsExport>("export_diagnostics");
+      setDiagnosticsMessage(`Exported ${exported.scans} retained scan${exported.scans === 1 ? "" : "s"} and ${exported.directories} directory record${exported.directories === 1 ? "" : "s"} to ${exported.path}`);
+    } catch (cause) { setDiagnosticsMessage(`Diagnostics export failed: ${String(cause)}`); }
+    finally { setExportingDiagnostics(false); }
+  }
+
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark">◎</div><div><strong>Orphan Cleaner</strong><span>Windows storage explorer</span></div></div>
@@ -171,6 +198,8 @@ export default function App() {
       <div className="public-data"><div><strong>Public folder data</strong><span>{publicData?.updatedAtUnix ? `Updated ${new Date(publicData.updatedAtUnix * 1000).toLocaleString()} · ` : "Not downloaded · "}{publicData?.gameDirectories ?? 0} game folder names · {publicData?.cleanerDirectories ?? 0} cleaner folder names</span><small>Read-only hints from <a href="https://github.com/mtkennerly/ludusavi-manifest" target="_blank" rel="noreferrer">Ludusavi</a> (MIT repository; sourced partly from PCGamingWiki) and <a href="https://github.com/MoscaDotTo/Winapp2" target="_blank" rel="noreferrer">Winapp2</a> (CC BY-SA 4.0). A path match does not prove that a whole folder is disposable.</small></div><button className="secondary" disabled={!native || updatingData || running} onClick={() => void updateData()}>{updatingData ? "Updating…" : "Update folder data"}</button></div>
       {dataMessage && <div className="notice">{dataMessage}</div>}
       {publicData?.warnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
+      <div className="public-data diagnostics"><div><strong>Diagnostics export</strong><span>Privacy-reviewed JSON for troubleshooting</span><small>Contains installed application names and versions, top-level scanned directory paths, aggregate sizes and counts, classifier evidence, warnings, and up to ten complete scans. User-profile and app-data prefixes are redacted. File contents and individual filenames are not included.</small></div><button className="secondary" disabled={!native || exportingDiagnostics || running} onClick={() => void exportDiagnostics()}>{exportingDiagnostics ? "Exporting…" : "Export diagnostics"}</button></div>
+      {diagnosticsMessage && <div className="notice diagnostics-message">{diagnosticsMessage}</div>}
       <section className="stats">
         <div><span>Installed apps found</span><strong>{apps.length}</strong><small>Registry and current-user MSIX</small></div>
         <div><span>Directories inspected</span><strong>{results.length}</strong><small>{running ? "Scan in progress" : summary ? summary.canceled ? "Scan canceled" : "Scan complete" : "Awaiting scan"}</small></div>
@@ -181,6 +210,15 @@ export default function App() {
       {summary && summary.skippedEntries > 0 && <div className="notice">{summary.skippedEntries.toLocaleString()} entries were inaccessible or skipped, including reparse points. Sizes may be incomplete.</div>}
       {summary?.warnings.map((warning, index) => <div className="notice" key={index}>{warning}</div>)}
       {summary && <div className="scan-coverage" title={summary.scannedRoots.join("\n")}>Scanned roots: {summary.scannedRoots.map(root => root.split(": ")[0]).join(", ") || "none"}{summary.canceled ? " (partial scan)" : ""}</div>}
+      {history && history.completeScans >= 2 && <section className="history-section">
+        <div className="section-heading"><div><h2>Previously observed applications</h2><p>{newlyMissing ? `${newlyMissing} application${newlyMissing === 1 ? "" : "s"} disappeared since the previous complete scan.` : "No newly missing applications were identified in the latest complete scan."} Historical ownership is evidence, not deletion approval.</p></div><span className="history-retention">Based on {history.completeScans} retained scans</span></div>
+        {history.applications.length > 0 ? <div className="history-cards">{history.applications.map(item => <button className="history-card" key={item.application.id} onClick={() => { setFilter("former"); setQuery(""); setSelectedPath(item.directories[0]?.path ?? null); }}>
+          <span className={`history-status ${item.newlyMissing ? "new" : ""}`}>{item.newlyMissing ? "New since previous scan" : "Previously detected"}</span>
+          <strong>{item.application.name}</strong>
+          <small>{item.application.publisher ?? "Publisher unknown"}{item.lastSeenAtUnix ? ` · Last installed observation ${new Date(item.lastSeenAtUnix * 1000).toLocaleString()}` : " · Installed observation is older than retained history"}</small>
+          <div><span>{formatBytes(item.remainingBytes)} remaining</span><span>{item.directories.length} director{item.directories.length === 1 ? "y" : "ies"}</span><span>{item.confidence === "probable" ? "Strong path history" : "Name-based path history"}</span></div>
+        </button>)}</div> : <div className="history-empty">No remaining directory is linked to an application that disappeared from the retained inventories.</div>}
+      </section>}
       <div className="section-heading"><div><h2>Application data</h2><p>Unmatched means ownership is unknown. It does not mean safe to remove.</p></div></div>
       <div className="toolbar"><div className="tabs"><button className={filter === "all" ? "selected" : ""} onClick={() => setFilter("all")}>All <span>{results.length}</span></button><button className={filter === "matched" ? "selected" : ""} onClick={() => setFilter("matched")}>Installed <span>{matched}</span></button><button className={filter === "known" ? "selected" : ""} onClick={() => setFilter("known")}>Known data <span>{known}</span></button><button className={filter === "former" ? "selected" : ""} onClick={() => setFilter("former")}>Former app data <span>{former}</span></button><button className={filter === "unknown" ? "selected" : ""} onClick={() => setFilter("unknown")}>Unknown <span>{unknown}</span></button></div><input aria-label="Search directories" placeholder="Search directories or applications" value={query} onChange={event => setQuery(event.target.value)} /></div>
       <div className="content-grid"><div className="table-wrap"><table><thead><tr><th>Directory</th><th>Size</th><th>Probable owner</th></tr></thead><tbody>{visible.map(result => <tr key={result.path} className={selectedPath === result.path ? "selected-row" : ""} onClick={() => setSelectedPath(result.path)} onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPath(result.path); } }} tabIndex={0} aria-selected={selectedPath === result.path}><td><strong>{shortPath(result.path)}</strong><small title={result.path}>{result.path}</small></td><td>{formatBytes(result.sizeBytes)}</td><td><span className="owner-name">{result.owner?.name ?? result.ownerHint ?? (result.ownership === "shared" ? result.path.split("\\").pop() || "Shared application data" : "Unresolved")}</span><span className={`badge ${assessment(result).className}`}>{assessment(result).label}</span></td></tr>)}</tbody></table>{visible.length === 0 && <div className="empty">{results.length === 0 ? "Start a scan to inspect application data directories." : "No directories match these filters."}</div>}</div>

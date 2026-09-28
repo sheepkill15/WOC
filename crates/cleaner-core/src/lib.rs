@@ -506,7 +506,9 @@ pub fn classify_directory(path: &Path, root: &str, apps: &[Application]) -> Dire
     result
 }
 
-fn same_application(left: &Application, right: &Application) -> bool {
+/// Compares application records across scans while tolerating registry-key or
+/// package inventory changes that preserve another stable identity signal.
+pub fn same_application(left: &Application, right: &Application) -> bool {
     left.id.eq_ignore_ascii_case(&right.id)
         || left.package_family_name.as_deref().zip(right.package_family_name.as_deref())
             .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))

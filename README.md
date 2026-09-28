@@ -39,10 +39,12 @@ The `ownership_corpus` integration test runs every case through the same `classi
 - Saves each completed four-root scan in a local SQLite database under the Tauri app-local-data directory. The most recent scan loads automatically on launch; **Refresh scan** is optional. A canceled or incomplete scan leaves the previous saved scan intact. Up to ten complete snapshots are retained for later history work.
 - Excludes its own app-local-data directory from scans, so the saved database does not inflate results.
 - On later scans, reuses an exact saved path-to-app relationship if the application has disappeared from a complete current inventory. Strong previous relationships are shown as **probable leftovers**; name-only relationships remain **possible leftovers**. Neither implies deletion safety.
+- Groups historically owned directories by applications that disappeared from retained inventories. The report shows remaining size, contributing directory count, the last installed observation, and whether the disappearance is new since the previous complete scan. Clicking a group opens its largest remaining directory; the feature remains read-only.
+- Exports an explicitly requested diagnostics JSON file to Downloads. The UI lists its contents before export; user-profile and app-local-data prefixes are redacted, public-data ETags are omitted, and no file contents or individual filenames are collected.
 - Cannot delete, quarantine, or modify discovered resources.
 
 The folder-data panel links to the sources and their terms. Ludusavi's repository is MIT-licensed but says its manifest is compiled partly from PCGamingWiki, whose content is Attribution–NonCommercial–ShareAlike; review those source terms before redistributing a bundled or derived catalog. Winapp2 is CC BY-SA 4.0. This prototype fetches source files only on request and stores a compact local index.
 
 ## Planned next work
 
-Grow the validation corpus with audited observations from real machines and broaden historical observations before making stronger orphan claims. Nested vendor-directory discovery can follow once top-level ownership is reliable. Cleanup remains out of scope until ownership and classification are reliable.
+Grow the validation corpus with audited observations from real machines before making stronger orphan claims. Nested vendor-directory discovery can follow once top-level ownership is reliable. Cleanup remains out of scope until ownership and classification are reliable.
