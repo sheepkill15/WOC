@@ -2,7 +2,7 @@
 //! both frontends always have the same capabilities.
 
 use cleaner_core::{Definitions, ScanMode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -12,11 +12,25 @@ use crate::{candidates, cleanup, diagnostics, history, logging, public_data, sca
 
 pub type Emitter = Arc<dyn Fn(&'static str, Value) + Send + Sync>;
 
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanState {
+    run_id: u64,
+    running: bool,
+    mode: Option<String>,
+    inventory: Option<cleaner_core::Inventory>,
+    references: Option<cleaner_core::ReferenceInventory>,
+    results: Vec<cleaner_core::DirectoryResult>,
+    progress_path: String,
+    finished: Option<scan_job::ScanFinishedEvent>,
+}
+
 pub struct Service {
     pub app_local_data: PathBuf,
     pub downloads: PathBuf,
     pub backend: &'static str,
     active: Mutex<Option<Arc<AtomicBool>>>,
+    scan_state: Mutex<ScanState>,
     /// Serializes cleanup, restore and purge so plans never race each other.
     cleanup_lock: Mutex<()>,
     emit: Emitter,
@@ -33,7 +47,7 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<Value, String> {
 
 impl Service {
     pub fn new(app_local_data: PathBuf, downloads: PathBuf, backend: &'static str, emit: Emitter) -> Arc<Self> {
-        Arc::new(Self { app_local_data, downloads, backend, active: Mutex::new(None), cleanup_lock: Mutex::new(()), emit })
+        Arc::new(Self { app_local_data, downloads, backend, active: Mutex::new(None), scan_state: Mutex::new(ScanState::default()), cleanup_lock: Mutex::new(()), emit })
     }
 
     fn database(&self) -> PathBuf { self.app_local_data.join("scans.sqlite3") }
@@ -45,6 +59,11 @@ impl Service {
     pub fn dispatch(self: &Arc<Self>, command: &str, args: &Value) -> Result<Value, String> {
         let root = &self.app_local_data;
         match command {
+            "scan_state" => to_value(self.scan_state.lock().map_err(|_| "Scan state is unavailable")?.clone()),
+            "scan_status" => {
+                let state = self.scan_state.lock().map_err(|_| "Scan state is unavailable")?;
+                to_value(json!({ "runId": state.run_id, "running": state.running, "resultCount": state.results.len() }))
+            }
             "app_info" => to_value(json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "backend": self.backend,
@@ -114,21 +133,21 @@ impl Service {
             "plan_cleanup" => {
                 let paths: Vec<String> = arg(args, "paths")?;
                 let scan = storage::load_latest(&self.database())?;
-                let ignored = self.ignored_paths(scan.as_ref())?;
+                let rules = storage::list_ignore_rules(&self.database())?;
+                let manual_cleanup: Option<bool> = arg(args, "manualCleanup")?;
                 let inventory = cleaner_core::installed_applications();
-                to_value(cleanup::plan(root, scan.as_ref(), &paths, &inventory.applications, &ignored))
+                let options = cleanup::PlanOptions { rules: &rules, manual_cleanup: manual_cleanup.unwrap_or(false), inventory_incomplete: !inventory.warnings.is_empty() };
+                to_value(cleanup::plan(root, scan.as_ref(), &paths, &inventory.applications, &options))
             }
             "execute_cleanup" => {
-                if self.is_running() { return Err("Wait for the running scan to finish before cleaning.".into()); }
                 let _guard = self.cleanup_lock.lock().map_err(|_| "Cleanup state is unavailable")?;
+                if self.is_running() { return Err("Wait for the running scan to finish before cleaning.".into()); }
                 let request: cleanup::CleanupRequest = serde_json::from_value(args.clone()).map_err(|error| format!("Invalid cleanup request: {error}"))?;
                 let scan = storage::load_latest(&self.database())?;
                 let inventory = cleaner_core::installed_applications();
-                if !inventory.warnings.is_empty() {
-                    return Err("The installed-application inventory is incomplete right now, so ownership cannot be revalidated. Nothing was moved.".into());
-                }
-                let ignored = self.ignored_paths(scan.as_ref())?;
-                to_value(cleanup::execute(root, scan.as_ref(), &request, &inventory.applications, &ignored)?)
+                let rules = storage::list_ignore_rules(&self.database())?;
+                let options = cleanup::PlanOptions { rules: &rules, manual_cleanup: request.manual_cleanup, inventory_incomplete: !inventory.warnings.is_empty() };
+                to_value(cleanup::execute(root, scan.as_ref(), &request, &inventory.applications, &options)?)
             }
             "list_quarantine" => {
                 let _guard = self.cleanup_lock.lock().map_err(|_| "Cleanup state is unavailable")?;
@@ -169,15 +188,6 @@ impl Service {
         }
     }
 
-    /// Paths kept by "always ignore" rules and by "hide once" rules for the current scan.
-    fn ignored_paths(&self, scan: Option<&storage::SavedScan>) -> Result<Vec<String>, String> {
-        let captured = scan.map(|scan| scan.captured_at_unix);
-        Ok(storage::list_ignore_rules(&self.database())?.into_iter()
-            .filter(|rule| rule.kind == "path" || (rule.kind == "once" && rule.scan_at_unix == captured))
-            .map(|rule| rule.value)
-            .collect())
-    }
-
     fn start_scan(self: &Arc<Self>, mode: ScanMode) -> Result<(), String> {
         // A scan saves a new snapshot; never start one while a cleanup is moving files.
         let _cleanup = self.cleanup_lock.try_lock().map_err(|_| "A cleanup is in progress; start the scan when it finishes.")?;
@@ -187,6 +197,13 @@ impl Service {
             if active.is_some() { return Err("A scan is already running".into()); }
             *active = Some(cancel.clone());
         }
+        let state = {
+            let mut state = self.scan_state.lock().map_err(|_| "Scan state is unavailable")?;
+            let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+            *state = ScanState { run_id: timestamp.max(state.run_id.saturating_add(1)), running: true, mode: Some(mode.as_str().into()), ..Default::default() };
+            json!({ "runId": state.run_id, "mode": state.mode })
+        };
+        (self.emit)("scan-started", state);
         let service = Arc::clone(self);
         std::thread::spawn(move || {
             let emit = service.emit.clone();
@@ -197,11 +214,28 @@ impl Service {
                 service.app_local_data.clone(),
                 mode,
                 cancel,
-                |inventory| emit_value("scan-inventory", serde_json::to_value(inventory)),
-                |references| emit_value("scan-references", serde_json::to_value(references)),
-                |result| emit_value("scan-result", serde_json::to_value(result)),
-                |path| emit_value("scan-progress", Ok(json!({ "path": path }))),
+                |inventory| {
+                    if let Ok(mut state) = service.scan_state.lock() { state.inventory = Some(inventory.clone()); }
+                    emit_value("scan-inventory", serde_json::to_value(inventory));
+                },
+                |references| {
+                    if let Ok(mut state) = service.scan_state.lock() { state.references = Some(references.clone()); }
+                    emit_value("scan-references", serde_json::to_value(references));
+                },
+                |result| {
+                    if let Ok(mut state) = service.scan_state.lock() { state.results.push(result.clone()); }
+                    emit_value("scan-result", serde_json::to_value(result));
+                },
+                |path| {
+                    if let Ok(mut state) = service.scan_state.lock() { state.progress_path = path.clone(); }
+                    emit_value("scan-progress", Ok(json!({ "path": path })));
+                },
             );
+            if let Ok(mut state) = service.scan_state.lock() {
+                state.running = false;
+                state.progress_path.clear();
+                state.finished = Some(finished.clone());
+            }
             if let Ok(mut active) = service.active.lock() { *active = None; }
             emit_value("scan-finished", serde_json::to_value(&finished));
         });

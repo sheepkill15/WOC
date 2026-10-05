@@ -146,7 +146,8 @@ fn item_for(result: &DirectoryResult, rules: &Rules<'_>, whole_allowed: bool, on
     let moved: u64 = result.content.items.iter()
         .filter(|item| rules.quarantined.iter().any(|path| path_is_within(&child_path(&result.path, &item.name), path)))
         .map(|item| item.size_bytes).sum();
-    let has_kept_category = result.content.items.iter().any(|item| rules.categories.contains(&item.kind));
+    let has_kept_category = result.content.items.iter().any(|item| rules.categories.contains(&item.kind))
+        || result.content.categories.iter().any(|kind| rules.categories.contains(kind));
     // Moving the whole folder would also move anything the user chose to keep inside it.
     let strictly_inside = |inner: &str| path_is_within(inner, &result.path) && !inner.trim_end_matches('\\').eq_ignore_ascii_case(result.path.trim_end_matches('\\'));
     let has_kept_inside = rules.paths.iter().any(|rule| strictly_inside(&rule.value)) || rules.quarantined.iter().any(|path| strictly_inside(path));

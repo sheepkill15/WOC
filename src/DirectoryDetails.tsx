@@ -7,6 +7,7 @@ import {
 import type { DirectoryResult } from "./types";
 import { Badge, Checkbox, Icon, SizeBar } from "./ui";
 import { CleanupDialog } from "./CleanupDialog";
+import { remainingCleanupSelection } from "./cleanupSelection";
 
 export function ReasonList({ reasons }: { reasons: { tone: string; text: string }[] }) {
   if (!reasons.length) return null;
@@ -19,13 +20,12 @@ export function ReasonList({ reasons }: { reasons: { tone: string; text: string 
 }
 
 export function DirectoryDetails({ result, onClose }: { result: DirectoryResult; onClose?: () => void }) {
-  const { openPath, addRule, backend } = useCleaner();
+  const { openPath, addRule, backend, running } = useCleaner();
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [cleanupPaths, setCleanupPaths] = useState<string[] | null>(null);
   const badge = statusBadge(result);
   const assessment = result.assessment;
   const items = result.content?.items ?? [];
-  const protectedLocation = result.locationClass === "system" || result.locationClass === "shared_runtime";
   const owner = ownerLabel(result);
   const bySafety = useMemo(() => {
     const totals: Record<string, number> = {};
@@ -74,7 +74,7 @@ export function DirectoryDetails({ result, onClose }: { result: DirectoryResult;
       <ul className="content-list">
         {items.map(item => {
           const path = childPath(item.name);
-          const selectable = connected && item.isDirectory && !protectedLocation;
+          const selectable = connected && !running && item.isDirectory;
           return <li key={item.name} title={item.reason}>
             {selectable ? <Checkbox label={`Select ${item.name}`} checked={selection.has(path)} onChange={value => toggle(path, value)} /> : <span className="checkbox-spacer" />}
             <span className="content-name">{item.name}</span>
@@ -114,8 +114,8 @@ export function DirectoryDetails({ result, onClose }: { result: DirectoryResult;
 
     <div className="details-actions">
       <button className="secondary" disabled={!connected} onClick={() => void openPath(result.path)}><Icon name="open" size={15} /> Open folder</button>
-      {!protectedLocation && connected && <button className="secondary" disabled={selection.size === 0} onClick={() => setCleanupPaths([...selection])}>Clean selected ({selection.size})</button>}
-      {!protectedLocation && connected && <button className="ghost danger-text" onClick={() => setCleanupPaths([result.path])}><Icon name="quarantine" size={15} /> Quarantine folder…</button>}
+      {connected && <button className="secondary" disabled={running || selection.size === 0} onClick={() => setCleanupPaths([...selection])}>Clean selected ({selection.size})</button>}
+      {connected && <button className="ghost danger-text" disabled={running} onClick={() => setCleanupPaths([result.path])}><Icon name="quarantine" size={15} /> Quarantine folder…</button>}
       <details className="menu">
         <summary className="ghost">Ignore…</summary>
         <div className="menu-panel">
@@ -125,7 +125,8 @@ export function DirectoryDetails({ result, onClose }: { result: DirectoryResult;
         </div>
       </details>
     </div>
-    {protectedLocation && <p className="muted small details-foot">Windows or a shared runtime manages this location, so cleanup actions are not offered.</p>}
-    {cleanupPaths && <CleanupDialog paths={cleanupPaths} onClose={() => setCleanupPaths(null)} onDone={() => setSelection(new Set())} />}
+    {cleanupPaths && <CleanupDialog manual paths={cleanupPaths} onClose={() => setCleanupPaths(null)} onDone={outcome => {
+      setSelection(previous => remainingCleanupSelection(previous, outcome));
+    }} />}
   </div>;
 }

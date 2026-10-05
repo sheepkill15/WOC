@@ -37,7 +37,7 @@ export function Quarantine({ navigate }: { navigate: (route: "settings") => void
             <div className="quarantine-main">
               <strong title={item.originalPath}>{baseName(item.originalPath)}</strong>
               <span title={item.originalPath}>{item.originalPath}</span>
-              <small>{item.owner ? `${item.owner} · ` : ""}{item.itemKind === "shortcut" ? "Shortcut" : "Folder"} · moved {formatDate(item.createdAtUnix)}{left !== null ? ` · deleted automatically in ${left} day${left === 1 ? "" : "s"}` : ""}</small>
+              <small>{item.owner ? `${item.owner} · ` : ""}{item.itemKind === "shortcut" ? "Shortcut" : item.itemKind === "file" ? "File" : "Folder"} · moved {formatDate(item.createdAtUnix)}{left !== null ? ` · deleted automatically in ${left} day${left === 1 ? "" : "s"}` : ""}</small>
             </div>
             <b>{formatBytes(item.sizeBytes)}</b>
             <div className="quarantine-actions">
@@ -54,7 +54,7 @@ export function Quarantine({ navigate }: { navigate: (route: "settings") => void
         <span title={item.originalPath}>{item.originalPath}</span><small>{formatDate(item.updatedAtUnix)}</small><b>{formatBytes(item.sizeBytes)}</b>
       </li>)}</ul>
     </Section>}
-    {quarantine && <p className="muted small">Quarantine folder: <code>{quarantine.quarantineDirectory}</code></p>}
+    {quarantine && <p className="muted small">Default quarantine folder: <code>{quarantine.quarantineDirectory}</code>. Items from other drives are quarantined on their original drive; use “Show in quarantine folder” to find them.</p>}
     {confirm && <Modal title="Delete permanently?" onClose={() => setConfirm(null)} footer={<>
       <button className="ghost" onClick={() => setConfirm(null)}>Cancel</button>
       <button className="primary danger" disabled={busy} onClick={() => void purgeAll(confirm)}>{busy ? "Deleting…" : `Delete ${formatCount(confirm.length, "item")}`}</button>

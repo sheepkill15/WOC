@@ -1,9 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { call, connectBackend, disconnectBackend, listenBackend, type BackendKind } from "./backend";
+import { mergeScanResults, needsScanSync } from "./scanSync";
 import type {
   AppInfo, Application, CandidateReport, CleanupOutcome, CleanupPlan, DefinitionsStatus, DiagnosticsExport, DirectoryResult,
   HistoryReport, IgnoreRule, Inventory, PostUninstallReport, PublicDataStatus, QuarantineReport, ReferenceInventory,
-  RemovedReport, SavedScan, ScanFinishedEvent, ScanSummary, Settings,
+  RemovedReport, SavedScan, ScanFinishedEvent, ScanSummary, ScanState, ScanStatus, Settings,
 } from "./types";
 
 export type BackendState = BackendKind | "connecting" | "unavailable";
@@ -44,8 +45,8 @@ type CleanerActions = {
   refreshQuarantine(): Promise<void>;
   addRule(kind: IgnoreRule["kind"], value: string, label: string): Promise<void>;
   removeRule(id: number): Promise<void>;
-  planCleanup(paths: string[]): Promise<CleanupPlan>;
-  executeCleanup(paths: string[], acknowledgeWarnings: boolean): Promise<CleanupOutcome>;
+  planCleanup(paths: string[], manualCleanup: boolean): Promise<CleanupPlan>;
+  executeCleanup(plan: CleanupPlan, acknowledgeWarnings: boolean): Promise<CleanupOutcome>;
   restore(id: number): Promise<void>;
   purge(id: number): Promise<void>;
   saveSettings(settings: Settings): Promise<void>;
@@ -94,6 +95,9 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [nonce, setNonce] = useState(0);
   const buffer = useRef<DirectoryResult[]>([]);
+  const scanStatus = useRef<ScanStatus>({ runId: 0, running: false, resultCount: 0 });
+  const syncEpoch = useRef(0);
+  const streamedPaths = useRef(new Set<string>());
   const toastId = useRef(0);
 
   const notify = useCallback((text: string, tone: Toast["tone"] = "info") => {
@@ -131,13 +135,74 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let mounted = true;
     const unlisteners: Array<() => void> = [];
+    let syncing = false;
+    let syncAgain = false;
+    let completedRun = 0;
+    let notifiedRun = 0;
     const flush = window.setInterval(() => {
       if (buffer.current.length && mounted) {
         const batch = buffer.current;
         buffer.current = [];
-        setResults(previous => [...previous, ...batch]);
+        setResults(previous => mergeScanResults(previous, batch));
       }
     }, 300);
+    async function synchronize() {
+      if (!mounted) return;
+      if (syncing) { syncAgain = true; return; }
+      syncing = true;
+      const epoch = syncEpoch.current;
+      try {
+        const snapshot = await call<ScanState>("scan_state");
+        if (!mounted || epoch !== syncEpoch.current) return;
+        const sameRun = snapshot.runId === scanStatus.current.runId;
+        const incomingPaths = [...snapshot.results, ...buffer.current].map(result => result.path.toLowerCase());
+        streamedPaths.current = new Set(sameRun && snapshot.running ? [...streamedPaths.current, ...incomingPaths] : incomingPaths);
+        scanStatus.current = { runId: snapshot.runId, running: snapshot.running, resultCount: streamedPaths.current.size };
+        setRunning(snapshot.running);
+        setRunningMode(snapshot.running ? snapshot.mode : null);
+        setProgressPath(snapshot.progressPath);
+        if (snapshot.runId > 0) {
+          // Keep arrivals newer than this snapshot; merging by path avoids replay duplicates.
+          const pending = buffer.current;
+          buffer.current = [];
+          setResults(previous => {
+            const merged = mergeScanResults(sameRun && snapshot.running ? mergeScanResults(previous, snapshot.results) : snapshot.results, pending);
+            return merged;
+          });
+          if (snapshot.inventory) { setApps(snapshot.inventory.applications); setInventoryWarnings(snapshot.inventory.warnings); }
+          if (snapshot.references) setReferences(snapshot.references);
+          if (snapshot.running) { setSummary(null); setSavedAt(null); setScanError(""); }
+          if (snapshot.finished) {
+            setSummary(snapshot.finished.summary);
+            setScanError(snapshot.finished.saveError ?? "");
+            if (completedRun !== snapshot.runId) {
+              const finished = snapshot.finished;
+              if (notifiedRun !== snapshot.runId) {
+                notifiedRun = snapshot.runId;
+                if (finished.summary.canceled) notify("Scan canceled. The previous saved scan is still available.");
+                else if (finished.savedAtUnix) notify(`Scan complete: ${finished.summary.directories.toLocaleString()} folders inspected.`, "success");
+              }
+              const [saved, , removedReport] = await Promise.all([call<SavedScan | null>("load_latest_scan"), loadDerived(), call<RemovedReport>("detect_removed_applications")]);
+              if (!mounted || epoch !== syncEpoch.current || scanStatus.current.runId !== snapshot.runId) return;
+              if (saved && (finished.savedAtUnix || finished.summary.canceled)) showSaved(saved);
+              setRemoved(removedReport);
+              completedRun = snapshot.runId;
+            }
+          }
+        }
+      } catch (cause) {
+        if (mounted) setScanError(`Scan state could not be synchronized: ${message(cause)}. Reconnecting automatically…`);
+      } finally {
+        syncing = false;
+        if (syncAgain && mounted) { syncAgain = false; void synchronize(); }
+      }
+    }
+    const reconcile = window.setInterval(() => {
+      if (!mounted) return;
+      void call<ScanStatus>("scan_status").then(status => {
+        if (mounted && (needsScanSync(status, scanStatus.current) || (!status.running && status.runId > 0 && completedRun !== status.runId))) void synchronize();
+      }).catch(() => { /* The next poll or SSE reconnect retries state reconciliation. */ });
+    }, 2000);
     async function connect() {
       try {
         const connection = await connectBackend();
@@ -146,32 +211,29 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
         setBackendError("");
         setRunning(connection.running);
         const register = (unlisten: () => void) => { if (mounted) unlisteners.push(unlisten); else unlisten(); };
-        register(await listenBackend<DirectoryResult>("scan-result", payload => { buffer.current.push(payload); }));
+        register(await listenBackend<{ runId: number; mode: "quick" | "deep" }>("scan-started", payload => {
+          if (!mounted) return;
+          syncEpoch.current++;
+          scanStatus.current = { runId: payload.runId, running: true, resultCount: 0 };
+          streamedPaths.current = new Set();
+          buffer.current = [];
+          setResults([]); setSummary(null); setSavedAt(null); setScanError(""); setRunning(true); setRunningMode(payload.mode);
+        }));
+        register(await listenBackend<DirectoryResult>("scan-result", payload => {
+          if (mounted) {
+            buffer.current.push(payload);
+            streamedPaths.current.add(payload.path.toLowerCase());
+            scanStatus.current.resultCount = streamedPaths.current.size;
+          }
+        }));
         register(await listenBackend<{ path: string }>("scan-progress", payload => { if (mounted) setProgressPath(payload.path); }));
         register(await listenBackend<Inventory>("scan-inventory", payload => {
           if (mounted) { setApps(payload.applications); setInventoryWarnings(payload.warnings); }
         }));
         register(await listenBackend<ReferenceInventory>("scan-references", payload => { if (mounted) setReferences(payload); }));
-        register(await listenBackend<ScanFinishedEvent>("scan-finished", payload => {
-          if (!mounted) return;
-          const batch = buffer.current;
-          buffer.current = [];
-          if (batch.length) setResults(previous => [...previous, ...batch]);
-          setSummary(payload.summary);
-          setRunning(false);
-          setRunningMode(null);
-          setProgressPath("");
-          if (payload.saveError) setScanError(payload.saveError);
-          if (payload.summary.canceled) notify("Scan canceled. The previous saved scan is still available.");
-          else if (payload.savedAtUnix) notify(`Scan complete: ${payload.summary.directories.toLocaleString()} folders inspected.`, "success");
-          void Promise.all([call<SavedScan | null>("load_latest_scan"), loadDerived(), call<RemovedReport>("detect_removed_applications")])
-            .then(([scan, , removedReport]) => {
-              if (!mounted) return;
-              if (scan && (payload.savedAtUnix || payload.summary.canceled)) showSaved(scan);
-              setRemoved(removedReport);
-            })
-            .catch(cause => { if (mounted) setScanError(message(cause)); });
-        }));
+        register(await listenBackend<ScanFinishedEvent>("scan-finished", () => { void synchronize(); }));
+        register(await listenBackend<object>("scan-resync", () => { void synchronize(); }));
+        register(await listenBackend<object>("backend-reconnected", () => { void synchronize(); }));
         const [info, loadedSettings, status, definitionStatus] = await Promise.all([
           call<AppInfo>("app_info"),
           call<Settings>("get_settings").catch(() => null),
@@ -199,23 +261,27 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
           if (mounted) setRules(ruleList);
         }
         void call<QuarantineReport>("list_quarantine").then(report => { if (mounted) setQuarantine(report); }).catch(() => {});
+        await synchronize();
       } catch (cause) {
         if (mounted) { setBackend("unavailable"); setBackendError(message(cause)); }
       }
     }
     void connect();
-    return () => { mounted = false; window.clearInterval(flush); unlisteners.forEach(unlisten => unlisten()); disconnectBackend(); };
+    return () => { mounted = false; syncEpoch.current++; window.clearInterval(flush); window.clearInterval(reconcile); unlisteners.forEach(unlisten => unlisten()); disconnectBackend(); };
   }, [nonce, loadDerived, showSaved, notify]);
 
   const actions: CleanerActions = useMemo(() => ({
     reconnect() { setBackend("connecting"); setBackendError(""); setNonce(value => value + 1); },
     async startScan(mode) {
+      syncEpoch.current++;
       setScanError("");
       buffer.current = [];
+      streamedPaths.current = new Set();
       setResults([]); setSummary(null); setSavedAt(null); setProgressPath(""); setRunning(true); setRunningMode(mode ?? settings?.defaultScanMode ?? "quick");
       try { await call("start_scan", mode ? { mode } : {}); }
       catch (cause) {
         setScanError(message(cause)); setRunning(false); setRunningMode(null);
+        scanStatus.current = { ...scanStatus.current, running: false };
         const saved = await call<SavedScan | null>("load_latest_scan").catch(() => null);
         if (saved) showSaved(saved);
       }
@@ -246,9 +312,9 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
       try { await call("remove_ignore_rule", { id }); await loadDerived(); }
       catch (cause) { notify(message(cause), "error"); }
     },
-    planCleanup: paths => call<CleanupPlan>("plan_cleanup", { paths }),
-    async executeCleanup(paths, acknowledgeWarnings) {
-      const outcome = await call<CleanupOutcome>("execute_cleanup", { paths, acknowledgeWarnings });
+    planCleanup: (paths, manualCleanup) => call<CleanupPlan>("plan_cleanup", { paths, manualCleanup }),
+    async executeCleanup(plan, acknowledgeWarnings) {
+      const outcome = await call<CleanupOutcome>("execute_cleanup", { paths: plan.items.map(item => item.path), manualCleanup: plan.manualCleanup, planToken: plan.planToken, acknowledgeWarnings });
       await Promise.all([loadDerived(), refreshQuarantine()]).catch(() => {});
       return outcome;
     },

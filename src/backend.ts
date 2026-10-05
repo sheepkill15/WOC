@@ -7,7 +7,7 @@ export type BackendConnection = { kind: BackendKind; running: boolean };
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const agentUrl = (import.meta.env.VITE_CLEANER_AGENT_URL as string | undefined)?.replace(/\/$/, "")
   ?? "http://127.0.0.1:47653";
-const TRANSPORT_VERSION = 2;
+const TRANSPORT_VERSION = 3;
 
 let activeKind: BackendKind | null = null;
 let eventSource: EventSource | null = null;
@@ -17,7 +17,7 @@ async function agentRequest<T>(command: string, args?: unknown): Promise<T> {
   const response = await fetch(`${agentUrl}/api/invoke/${encodeURIComponent(command)}`, {
     method: "POST",
     cache: "no-store",
-    headers: { "X-Orphan-Cleaner-Client": "web-v2", "Content-Type": "application/json" },
+    headers: { "X-Orphan-Cleaner-Client": "web-v3", "Content-Type": "application/json" },
     body: JSON.stringify(args ?? {}),
   });
   if (!response.ok) {
@@ -59,11 +59,12 @@ export async function listenBackend<T>(eventName: string, callback: (payload: T)
   if (activeKind !== "agent") throw new Error("No Windows cleaner backend is connected");
   if (!eventSource) eventSource = new EventSource(`${agentUrl}/api/events`);
   const source = eventSource;
-  const handler = (event: Event) => callback(JSON.parse((event as MessageEvent<string>).data) as T);
-  source.addEventListener(eventName, handler);
+  const nativeEvent = eventName === "backend-reconnected" ? "open" : eventName;
+  const handler = (event: Event) => callback((nativeEvent === "open" ? {} : JSON.parse((event as MessageEvent<string>).data)) as T);
+  source.addEventListener(nativeEvent, handler);
   eventListenerCount++;
   return () => {
-    source.removeEventListener(eventName, handler);
+    source.removeEventListener(nativeEvent, handler);
     eventListenerCount--;
     if (eventListenerCount === 0 && eventSource === source) { source.close(); eventSource = null; }
   };

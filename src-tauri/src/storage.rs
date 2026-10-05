@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const RETAINED_SCANS: usize = 10;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,6 +139,17 @@ fn initialize_db(conn: &Connection) -> Result<(), String> {
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );"
+        ).map_err(err)?;
+    }
+    if version < 3 {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS cleanup_exclusions (
+                 path TEXT PRIMARY KEY COLLATE NOCASE,
+                 scan_session_id INTEGER NOT NULL
+             );
+             INSERT OR IGNORE INTO cleanup_exclusions (path, scan_session_id)
+             SELECT original_path, COALESCE((SELECT MAX(id) FROM scan_sessions), 0)
+             FROM quarantine_items WHERE status IN ('quarantined', 'purged');"
         ).map_err(err)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(err)?;
     }
@@ -302,13 +313,17 @@ fn quarantine_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QuarantineItem> {
 const QUARANTINE_COLUMNS: &str = "id, original_path, quarantine_path, size_bytes, file_count, created_at_unix, owner, reason, item_kind, status, updated_at_unix";
 
 pub fn insert_quarantine(conn: &Connection, item: &QuarantineItem) -> Result<i64, String> {
-    conn.execute(
+    let transaction = conn.unchecked_transaction().map_err(err)?;
+    transaction.execute(
         "INSERT INTO quarantine_items (original_path, quarantine_path, size_bytes, file_count, created_at_unix, owner, reason, item_kind, status, updated_at_unix)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![item.original_path, item.quarantine_path, item.size_bytes as i64, item.file_count as i64, item.created_at_unix as i64,
             item.owner, item.reason, item.item_kind, item.status, item.updated_at_unix as i64],
     ).map_err(err)?;
-    Ok(conn.last_insert_rowid())
+    let id = transaction.last_insert_rowid();
+    exclude_cleaned_path(&transaction, &item.original_path)?;
+    transaction.commit().map_err(err)?;
+    Ok(id)
 }
 
 pub fn list_quarantine(conn: &Connection, include_history: bool) -> Result<Vec<QuarantineItem>, String> {
@@ -330,6 +345,24 @@ pub fn get_quarantine(conn: &Connection, id: i64) -> Result<Option<QuarantineIte
 pub fn set_quarantine_status(conn: &Connection, id: i64, status: &str) -> Result<(), String> {
     conn.execute("UPDATE quarantine_items SET status = ?1, updated_at_unix = ?2 WHERE id = ?3", params![status, now_unix() as i64, id]).map_err(err)?;
     Ok(())
+}
+
+pub fn exclude_cleaned_path(conn: &Connection, path: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO cleanup_exclusions (path, scan_session_id) VALUES (?1, COALESCE((SELECT MAX(id) FROM scan_sessions), 0))
+         ON CONFLICT(path) DO UPDATE SET scan_session_id = excluded.scan_session_id", [path],
+    ).map_err(err)?;
+    Ok(())
+}
+
+pub fn restore_cleaned_path(conn: &Connection, path: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM cleanup_exclusions WHERE path = ?1", [path]).map_err(err)?;
+    Ok(())
+}
+
+pub fn cleaned_paths(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut statement = conn.prepare("SELECT path FROM cleanup_exclusions WHERE scan_session_id >= COALESCE((SELECT MAX(id) FROM scan_sessions), 0) ORDER BY path").map_err(err)?;
+    statement.query_map([], |row| row.get(0)).map_err(err)?.collect::<Result<Vec<String>, _>>().map_err(err)
 }
 
 pub fn record_action(conn: &Connection, action: &str, path: &str, outcome: &str, detail: &str) {
@@ -409,7 +442,7 @@ mod tests {
         assert_eq!(loaded.captured_at_unix, 5);
         assert!(loaded.references.references.is_empty());
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -430,5 +463,20 @@ mod tests {
         save_settings(&database, &settings).unwrap();
         assert_eq!(load_settings(&database).unwrap().quarantine_retention_days, 7);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cleanup_exclusions_survive_purge_until_a_new_snapshot_and_restore_clears_them() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_db(&conn).unwrap();
+        save_to_connection(&mut conn, &scan(1)).unwrap();
+        exclude_cleaned_path(&conn, r"C:\Test\App1").unwrap();
+        assert_eq!(cleaned_paths(&conn).unwrap(), vec![r"C:\Test\App1"]);
+        // The next snapshot has the same timestamp: session identity still advances.
+        save_to_connection(&mut conn, &scan(1)).unwrap();
+        assert!(cleaned_paths(&conn).unwrap().is_empty());
+        exclude_cleaned_path(&conn, r"C:\Test\App1").unwrap();
+        restore_cleaned_path(&conn, r"c:\test\app1").unwrap();
+        assert!(cleaned_paths(&conn).unwrap().is_empty());
     }
 }

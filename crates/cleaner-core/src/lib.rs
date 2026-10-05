@@ -810,7 +810,7 @@ fn inspect_directory_inner(path: &Path, cancel: &AtomicBool, loose_only: bool) -
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let index = match child_index {
                     None if children.len() < MAX_TRACKED_CHILDREN => { children.push(ChildAccumulator::new(name)); Some(children.len() - 1) }
-                    None => { untracked_children += 1; Some(usize::MAX) }
+                    None => { untracked_children += 1; untracked.add_directory_name(&name); Some(usize::MAX) }
                     Some(index) => {
                         if index == usize::MAX { untracked.add_directory_name(&name); } else { children[index].add_directory_name(&name); }
                         Some(index)
@@ -859,6 +859,9 @@ fn inspect_directory_inner(path: &Path, cancel: &AtomicBool, loose_only: bool) -
     stats.shallow_executables.truncate(3);
     stats.content = content::build_profile(children, loose, extensions, executable_count, database_count, large_file_count, large_file_bytes, untracked_children);
     if untracked_children > 0 {
+        stats.content.categories.extend(untracked.categories());
+        stats.content.categories.sort();
+        stats.content.categories.dedup();
         let mut item = untracked.into_item(false);
         item.name = format!("{untracked_children} more folders");
         item.reason = format!("Only the first {MAX_TRACKED_CHILDREN} folders are listed individually. {}", item.reason);

@@ -12,7 +12,7 @@ export type ContentItem = {
 export type ExtensionStat = { extension: string; sizeBytes: number; fileCount: number };
 export type ContentProfile = {
   items: ContentItem[]; extensions: ExtensionStat[]; executableCount: number; databaseCount: number;
-  largeFileCount: number; largeFileBytes: number; untrackedChildren?: number;
+  largeFileCount: number; largeFileBytes: number; untrackedChildren?: number; categories?: string[];
 };
 export type ExecutableInfo = { fileName: string; sizeBytes: number; companyName?: string | null; productName?: string | null; fileDescription?: string | null; productVersion?: string | null };
 export type Reason = { tone: "positive" | "negative" | "neutral"; text: string };
@@ -37,6 +37,8 @@ export type SystemReference = {
 export type ReferenceInventory = { references: SystemReference[]; warnings: string[] };
 export type SavedScan = { capturedAtUnix: number; inventory: Inventory; summary: ScanSummary; results: DirectoryResult[]; references?: ReferenceInventory };
 export type ScanFinishedEvent = { summary: ScanSummary; savedAtUnix: number | null; saveError: string | null };
+export type ScanStatus = { runId: number; running: boolean; resultCount: number };
+export type ScanState = Omit<ScanStatus, "resultCount"> & { mode: "quick" | "deep" | null; inventory: Inventory | null; references: ReferenceInventory | null; results: DirectoryResult[]; progressPath: string; finished: ScanFinishedEvent | null };
 export type PublicDataStatus = { updatedAtUnix: number | null; gameDirectories: number; cleanerDirectories: number; warnings: string[] };
 export type HistoricalDirectory = { path: string; root: string; sizeBytes: number; orphanStatus: string };
 export type HistoricalApplication = {
@@ -63,8 +65,8 @@ export type CandidateReport = {
   ignoredPaths: number; quarantinedPaths: number;
 };
 export type IgnoreRule = { id: number; kind: "path" | "application" | "category" | "once"; value: string; label: string; createdAtUnix: number; scanAtUnix?: number | null };
-export type PlanItem = { path: string; itemKind: string; sizeBytes: number; fileCount: number; status: "ready" | "warning" | "blocked" | "redundant"; messages: string[]; owner: string | null; safety: string; reason: string };
-export type CleanupPlan = { items: PlanItem[]; totalBytes: number; readyCount: number; warningCount: number; blockedCount: number; quarantineDirectory: string; scanAtUnix: number | null };
+export type PlanItem = { path: string; itemKind: string; sizeBytes: number; fileCount: number; status: "ready" | "warning" | "blocked" | "redundant"; messages: string[]; owner: string | null; safety: string; reason: string; newestModifiedUnix: number | null; quarantineDirectory: string };
+export type CleanupPlan = { items: PlanItem[]; totalBytes: number; readyCount: number; warningCount: number; blockedCount: number; quarantineDirectory: string; scanAtUnix: number | null; manualCleanup: boolean; planToken: string };
 export type ExecutedItem = { path: string; moved: boolean; message: string; quarantineId: number | null; sizeBytes: number };
 export type CleanupOutcome = { items: ExecutedItem[]; movedCount: number; movedBytes: number; failedCount: number };
 export type QuarantineItem = {

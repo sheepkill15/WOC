@@ -157,6 +157,10 @@ h1, h2, h3, h4 { margin: 0; letter-spacing: -.01em; }
 .two-column { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; }
 .card { padding: 0; }
 .card h3 { font-size: 14px; }
+.manual-cleanup { margin: 0 0 24px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-sunken); }
+.manual-cleanup label { display: flex; flex-direction: column; gap: 6px; font-weight: 600; }
+.manual-cleanup input { width: 100%; font-weight: 400; }
+.manual-cleanup p { margin: 8px 0; }
 
 /* ---------- Badges, stats, notices ---------- */
 .badge { display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; padding: 1px 6px; font-size: 11px; font-weight: 600; white-space: nowrap; line-height: 1.5; }

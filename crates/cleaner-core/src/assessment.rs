@@ -132,6 +132,10 @@ pub fn assess(result: &DirectoryResult, now_unix: u64) -> Assessment {
 
     // ---- Deletion safety (independent of orphan confidence) ----
     let mut deletion_safety = content::overall_safety(&result.content);
+    if result.skipped_entries > 0 {
+        if content::safety_rank(&deletion_safety) < content::safety_rank(REVIEW) { deletion_safety = REVIEW; }
+        reasons.push(reason("negative", "Some entries could not be inspected; the content assessment is incomplete."));
+    }
     let mut reclaimable_bytes = 0u64;
     let mut retained_bytes = 0u64;
     for item in &result.content.items {
@@ -153,10 +157,10 @@ pub fn assess(result: &DirectoryResult, now_unix: u64) -> Assessment {
     if personal_data {
         deletion_safety = PRESERVE;
         reclaimable_bytes = 0;
-        reasons.push(reason("negative", "This personal folder is included for review and is excluded from cleanup."));
+        reasons.push(reason("negative", "This personal folder is not recommended for cleanup. Manual cleanup is available if you choose to remove it."));
     } else if system_managed || shared_runtime {
         deletion_safety = PRESERVE;
-        reasons.push(reason("negative", "Windows or a shared runtime manages this location; it is excluded from cleanup."));
+        reasons.push(reason("negative", "Windows or a shared runtime manages this location. Cleanup is not recommended; moving it manually can break applications or Windows."));
     } else if ownership_class == "shared" && content::safety_rank(deletion_safety) < content::safety_rank(REVIEW) {
         deletion_safety = REVIEW;
     }
@@ -285,5 +289,18 @@ mod tests {
         assert_eq!(assessment.deletion_safety, PRESERVE);
         assert_eq!(assessment.reclaimable_bytes, 0);
         assert_eq!(assessment.recommended_action, "keep");
+    }
+
+    #[test]
+    fn skipped_entries_prevent_a_whole_folder_cleanup_recommendation() {
+        let result = DirectoryResult {
+            orphan_status: "probable_orphan".into(), ownership: "historical_confirmed".into(),
+            skipped_entries: 1,
+            content: ContentProfile { items: vec![item("Cache", SAFE, 10)], ..Default::default() },
+            ..Default::default()
+        };
+        let assessment = assess(&result, 0);
+        assert_eq!(assessment.deletion_safety, REVIEW);
+        assert_ne!(assessment.recommended_action, "clean");
     }
 }

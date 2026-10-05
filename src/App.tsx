@@ -71,7 +71,7 @@ export default function App() {
       <nav className="nav">
         {nav.map(item => <div key={item.route}>
           {item.section && <div className="nav-label">{item.section}</div>}
-          <button className={`nav-item ${route === item.route ? "active" : ""}`} onClick={() => navigate(item.route)} aria-current={route === item.route ? "page" : undefined}>
+          <button className={`nav-item ${route === item.route ? "active" : ""}`} onClick={() => navigate(item.route)} aria-label={item.label} aria-current={route === item.route ? "page" : undefined}>
             <Icon name={item.icon} size={17} /><span>{item.label}</span>
             {item.badge !== undefined && <span className={`nav-badge ${item.tone ? `tone-${item.tone}` : ""}`}>{item.badge}</span>}
           </button>

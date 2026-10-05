@@ -4,7 +4,7 @@
 //! timestamps collected while measuring a directory. File contents are never
 //! read. Every category maps to a fixed deletion-safety class, and user-data
 //! markers found anywhere below a child directory escalate that child to
-//! `preserve` unless the child is itself a recognized cache.
+//! `preserve`, including folders named Cache. Cached images remain regenerable.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -63,6 +63,9 @@ pub struct ContentProfile {
     /// Child directories that were not tracked individually (beyond the tracking cap).
     #[serde(default)]
     pub untracked_children: u64,
+    /// All observed categories, including small or grouped items omitted from the UI.
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 impl ContentProfile {
@@ -213,10 +216,6 @@ fn is_user_data_marker_name(name: &str) -> Option<&'static str> {
     }
 }
 
-fn is_cache_kind(kind: &str) -> bool {
-    matches!(kind, "cache" | "temporary" | "log" | "crash_dump" | "shader_cache" | "thumbnail_cache")
-}
-
 /// Accumulates measurements for one immediate child directory, or for all loose
 /// files of one extension category directly inside the measured directory.
 #[derive(Default, Clone)]
@@ -227,6 +226,7 @@ pub struct ChildAccumulator {
     pub newest: Option<u64>,
     kind_bytes: BTreeMap<&'static str, u64>,
     markers: BTreeSet<&'static str>,
+    directory_kinds: BTreeSet<&'static str>,
 }
 
 impl ChildAccumulator {
@@ -252,9 +252,16 @@ impl ChildAccumulator {
     }
 
     pub fn add_directory_name(&mut self, name: &str) {
+        if let Some((kind, _)) = kind_for_directory_name(name) { self.directory_kinds.insert(kind); }
         if let Some(marker) = is_user_data_marker_name(name) {
             self.markers.insert(marker);
         }
+    }
+
+    pub fn categories(&self) -> BTreeSet<String> {
+        let mut kinds: BTreeSet<String> = self.kind_bytes.keys().chain(self.directory_kinds.iter()).map(|kind| (*kind).to_owned()).collect();
+        if let Some((kind, _)) = kind_for_directory_name(&self.name) { kinds.insert(kind.to_owned()); }
+        kinds
     }
 
     fn dominant_kind(&self) -> Option<(&'static str, u64)> {
@@ -283,7 +290,7 @@ impl ChildAccumulator {
         };
         // Media inside a named cache stays cache (thumbnails, image caches). Media
         // elsewhere is only user data when it dominates an otherwise unknown folder.
-        if !self.markers.is_empty() && !is_cache_kind(kind) {
+        if !self.markers.is_empty() {
             let markers = self.markers.iter().copied().collect::<Vec<_>>().join(", ");
             if safety_for_kind(kind) != PRESERVE {
                 reason = format!("{reason} It also contains {markers}, so it is treated as user data.");
@@ -318,6 +325,7 @@ pub fn build_profile(
     large_file_bytes: u64,
     untracked_children: u64,
 ) -> ContentProfile {
+    let mut categories: BTreeSet<String> = children.iter().chain(loose.values()).flat_map(ChildAccumulator::categories).collect();
     let mut items: Vec<ContentItem> = children.into_iter().map(|child| child.into_item(true)).collect();
     for (kind, accumulator) in loose {
         let mut item = accumulator.into_item(false);
@@ -328,6 +336,7 @@ pub fn build_profile(
         item.reason = "Files stored directly in this folder, grouped by extension. They cannot be selected individually.".into();
         items.push(item);
     }
+    categories.extend(items.iter().map(|item| item.kind.clone()));
     items.sort_by(|left, right| right.size_bytes.cmp(&left.size_bytes).then_with(|| left.name.cmp(&right.name)));
     if items.len() > MAX_REPORTED_ITEMS {
         let rest = items.split_off(MAX_REPORTED_ITEMS - 1);
@@ -357,6 +366,7 @@ pub fn build_profile(
         large_file_count,
         large_file_bytes,
         untracked_children,
+        categories: categories.into_iter().collect(),
     }
 }
 
@@ -394,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn user_data_markers_escalate_non_cache_children() {
+    fn user_data_markers_escalate_even_named_caches() {
         let mut child = ChildAccumulator::new("Profiles");
         child.add_file("json", 100, None);
         child.add_directory_name("SaveGames");
@@ -403,7 +413,10 @@ mod tests {
 
         let mut cache = ChildAccumulator::new("Cache");
         cache.add_file("sav", 100, None);
-        assert_eq!(cache.into_item(true).safety, SAFE, "named caches are not escalated");
+        assert_eq!(cache.into_item(true).safety, PRESERVE, "a cache name cannot hide save files");
+        let mut thumbnails = ChildAccumulator::new("Cache");
+        thumbnails.add_file("png", 100, None);
+        assert_eq!(thumbnails.into_item(true).safety, SAFE, "cached images remain regenerable");
     }
 
     #[test]

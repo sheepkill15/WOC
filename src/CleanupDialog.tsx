@@ -7,19 +7,21 @@ import { Badge, Icon, Modal, Notice } from "./ui";
 const statusTone = { ready: "good", warning: "warn", blocked: "danger", redundant: "muted" } as const;
 const statusLabel = { ready: "Ready", warning: "Needs confirmation", blocked: "Blocked", redundant: "Already included" } as const;
 
-export function CleanupDialog({ paths, onClose, onDone }: { paths: string[]; onClose: () => void; onDone?: (outcome: CleanupOutcome) => void }) {
+export function CleanupDialog({ paths, onClose, onDone, manual = false }: { paths: string[]; onClose: () => void; onDone?: (outcome: CleanupOutcome) => void; manual?: boolean }) {
   const { planCleanup, executeCleanup, notify } = useCleaner();
   const [plan, setPlan] = useState<CleanupPlan | null>(null);
   const [error, setError] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [outcome, setOutcome] = useState<CleanupOutcome | null>(null);
+  const [manualCleanup, setManualCleanup] = useState(manual);
 
   useEffect(() => {
     let active = true;
-    planCleanup(paths).then(result => { if (active) setPlan(result); }).catch(cause => { if (active) setError(String(cause instanceof Error ? cause.message : cause)); });
+    setPlan(null); setError(""); setAcknowledged(false);
+    planCleanup(paths, manualCleanup).then(result => { if (active) setPlan(result); }).catch(cause => { if (active) setError(String(cause instanceof Error ? cause.message : cause)); });
     return () => { active = false; };
-  }, [paths, planCleanup]);
+  }, [paths, planCleanup, manualCleanup]);
 
   const actionable = plan ? plan.items.filter(item => item.status === "ready" || (item.status === "warning" && acknowledged)) : [];
   const actionableBytes = actionable.reduce((sum, item) => sum + item.sizeBytes, 0);
@@ -28,12 +30,16 @@ export function CleanupDialog({ paths, onClose, onDone }: { paths: string[]; onC
     if (!plan) return;
     setExecuting(true);
     try {
-      const result = await executeCleanup(paths, acknowledged);
+      const result = await executeCleanup(plan, acknowledged);
       setOutcome(result);
       onDone?.(result);
       if (result.movedCount) notify(`Moved ${formatCount(result.movedCount, "item")} (${formatBytes(result.movedBytes)}) to quarantine.`, "success");
     } catch (cause) {
       setError(String(cause instanceof Error ? cause.message : cause));
+      setAcknowledged(false);
+      setPlan(null);
+      try { setPlan(await planCleanup(paths, manualCleanup)); }
+      catch { /* Keep the execution error visible; no stale plan can be executed. */ }
     } finally {
       setExecuting(false);
     }
@@ -54,13 +60,17 @@ export function CleanupDialog({ paths, onClose, onDone }: { paths: string[]; onC
     </Modal>;
   }
 
-  return <Modal wide title="Review cleanup" onClose={onClose} footer={<>
+  return <Modal wide title="Review cleanup" onClose={() => { if (!executing) onClose(); }} footer={<>
     <span className="modal-foot-note">Items are moved to quarantine, not deleted.</span>
-    <button className="ghost" onClick={onClose}>Cancel</button>
+    <button className="ghost" disabled={executing} onClick={onClose}>Cancel</button>
     <button className="primary danger" disabled={!plan || executing || actionable.length === 0} onClick={() => void run()}>
       {executing ? "Moving…" : actionable.length ? `Move ${formatCount(actionable.length, "item")} · ${formatBytes(actionableBytes)}` : "Nothing to move"}
     </button>
   </>}>
+    <label className="ack">
+      <input type="checkbox" checked={manualCleanup} disabled={executing} onChange={event => setManualCleanup(event.target.checked)} />
+      <span>Manual cleanup — allow personal folders, installed apps, system-managed data and paths kept by my rules. Show the risks before moving them.</span>
+    </label>
     {error && <Notice tone="error">{error}</Notice>}
     {!plan && !error && <div className="loading-row"><span className="spinner" /> Revalidating each item against the current installation…</div>}
     {plan && <>
@@ -71,7 +81,7 @@ export function CleanupDialog({ paths, onClose, onDone }: { paths: string[]; onC
         <div><span>Blocked</span><strong className="text-danger">{plan.blockedCount}</strong></div>
         <div><span>Total</span><strong>{formatBytes(plan.totalBytes)}</strong></div>
       </div>
-      <p className="muted small">Each path was checked again just now: it still exists, is not a link or junction, is not a protected Windows location, and its owner was re-checked against the current list of installed apps. Nothing outside these paths is touched.</p>
+      <p className="muted small">Contents, ownership and keep rules were checked again. Manual cleanup can override recommendations and keep rules for this operation. If the plan changes before execution, you'll review it again.</p>
       <ul className="plan-list">
         {plan.items.map(item => <li key={item.path} className={`plan-item status-${item.status}`}>
           <div className="plan-item-head">
@@ -81,16 +91,17 @@ export function CleanupDialog({ paths, onClose, onDone }: { paths: string[]; onC
           </div>
           <div className="plan-item-meta">
             {item.owner && <span>{item.owner}</span>}
-            <span>{item.itemKind === "content" ? "Subfolder" : item.itemKind === "shortcut" ? "Shortcut" : "Folder"}</span>
+            <span>{item.itemKind === "content" ? "Subfolder" : item.itemKind === "shortcut" ? "Shortcut" : item.itemKind === "file" ? "File" : "Folder"}</span>
             {item.safety && <Badge tone={safetyTone(item.safety)}>{safetyLabels[item.safety] ?? item.safety}</Badge>}
             {item.fileCount > 0 && <span>{formatCount(item.fileCount, "file")}</span>}
           </div>
           {item.messages.map((messageText, index) => <p key={index} className="plan-message"><Icon name={item.status === "blocked" ? "close" : "alert"} size={13} /> {messageText}</p>)}
+          {item.status !== "blocked" && <p className="muted small">Quarantine: <code>{item.quarantineDirectory}</code></p>}
         </li>)}
       </ul>
       {plan.warningCount > 0 && <label className="ack">
         <input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} />
-        <span>I reviewed the {formatCount(plan.warningCount, "warning")} above and want to move those items too. They stay restorable from quarantine.</span>
+        <span>I reviewed the warnings for the {formatCount(plan.warningCount, "item")} listed above and want to move them to quarantine.</span>
       </label>}
       <p className="muted small">Quarantine folder: <code>{plan.quarantineDirectory}</code></p>
     </>}

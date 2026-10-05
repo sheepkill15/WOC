@@ -5,6 +5,7 @@ import type { CandidateGroup, CandidateItem } from "../types";
 import { Badge, Checkbox, Empty, Icon, Notice, PageHeader, SizeBar } from "../ui";
 import { ReasonList } from "../DirectoryDetails";
 import { CleanupDialog } from "../CleanupDialog";
+import { remainingCleanupSelection } from "../cleanupSelection";
 
 const kindLabel: Record<string, string> = {
   uninstalled: "Uninstalled app", old_version: "Old version", possible_leftover: "Possible leftover", unregistered: "Unregistered app",
@@ -113,6 +114,8 @@ export function Cleanup() {
   const [selected, setSelectedState] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dialogPaths, setDialogPaths] = useState<string[] | null>(null);
+  const [manualPath, setManualPath] = useState("");
+  const [manualDialog, setManualDialog] = useState(false);
   const [filter, setFilter] = useState<"all" | "high" | "review" | "info">("all");
   const initializedFor = useRef<number | null | undefined>(undefined);
   const connected = backend === "tauri" || backend === "agent";
@@ -138,9 +141,24 @@ export function Cleanup() {
   for (const group of candidates?.groups ?? []) counts[group.priority]++;
   const setSelected = (updater: (previous: Set<string>) => Set<string>) => setSelectedState(updater);
 
+  const manualForm = <form className="manual-cleanup" onSubmit={event => {
+    event.preventDefault();
+    if (manualPath.trim()) { setManualDialog(true); setDialogPaths([manualPath.trim()]); }
+  }}>
+    <label className="field"><span>Clean a file or folder manually</span>
+      <input aria-label="Manual cleanup path" placeholder="C:\\Users\\you\\Downloads\\Unneeded folder" value={manualPath} onChange={event => setManualPath(event.target.value)} />
+    </label>
+    <p className="muted small">Enter a full local path, including personal folders or paths outside the scan. You'll review the risks and quarantine location before anything moves.</p>
+    <button className="secondary" disabled={!connected || running || !manualPath.trim()}>Review manual cleanup</button>
+  </form>;
+  const dialog = dialogPaths && <CleanupDialog manual={manualDialog} paths={dialogPaths} onClose={() => setDialogPaths(null)} onDone={outcome => {
+    setSelectedState(previous => remainingCleanupSelection(previous, outcome));
+  }} />;
+
   if (!candidates || candidates.scanAtUnix === null) {
     return <div className="page"><PageHeader title="Cleanup" description="Folders that were left behind or can be recreated, grouped by application." />
-      <Empty icon="cleanup" title="No saved scan yet">Run a scan first (button at the bottom left). Cleanup candidates are built from the saved scan.</Empty></div>;
+      {manualForm}
+      <Empty icon="cleanup" title="No saved scan yet">Run a scan for recommended candidates, or enter a path above for manual cleanup.</Empty>{dialog}</div>;
   }
 
   return <div className="page with-selection-bar">
@@ -149,6 +167,7 @@ export function Cleanup() {
         ? <>Recommended items are already ticked; they only contain data that can be recreated. Open a group to see why it's listed, tick anything else you don't need, then click <b>Review &amp; clean</b>.</>
         : <>Nothing is certain enough to tick for you. Open a group to see why it's listed, tick what you know you don't need, then click <b>Review &amp; clean</b>.</>} />
     {running && <Notice>A scan is running. Candidates below are from the previous saved scan.</Notice>}
+    {manualForm}
     <div className="filter-row">
       <div className="segmented">
         {([["all", "All", candidates.groups.length], ["high", "Recommended", counts.high], ["review", "Needs your decision", counts.review], ["info", "Information only", counts.info]] as const).map(([key, label, count]) =>
@@ -170,17 +189,14 @@ export function Cleanup() {
         return <li key={group.id}><span><b>{group.title}</b> · {formatBytes(group.totalBytes)} · kept by “{group.ignoredBy}”</span>{rule && <button className="ghost" onClick={() => void removeRule(rule.id)}>Stop keeping</button>}</li>;
       })}</ul>
     </details>}
-    {(candidates.ignoredPaths > 0 || candidates.quarantinedPaths > 0) && <p className="muted small">{candidates.ignoredPaths > 0 && `${formatCount(candidates.ignoredPaths, "folder")} hidden by ignore rules. `}{candidates.quarantinedPaths > 0 && `${formatCount(candidates.quarantinedPaths, "folder")} already in quarantine.`}</p>}
+    {(candidates.ignoredPaths > 0 || candidates.quarantinedPaths > 0) && <p className="muted small">{candidates.ignoredPaths > 0 && `${formatCount(candidates.ignoredPaths, "folder")} hidden by ignore rules. `}{candidates.quarantinedPaths > 0 && `${formatCount(candidates.quarantinedPaths, "folder")} already cleaned since this scan.`}</p>}
 
     <div className={`selection-bar visible ${selected.size ? "" : "idle"}`}>
       {selected.size ? <div><strong>{formatCount(selected.size, "item")} selected · {formatBytes(selectedBytes)}</strong><span>Next you'll see a plan. Nothing moves until you confirm, and everything goes to quarantine{quarantine?.retentionDays ? ` for ${quarantine.retentionDays} days` : ""}.</span></div>
         : <div><strong>Tick the folders you want to remove</strong><span>Selected items are moved to quarantine, not deleted, so you can restore them.</span></div>}
       {selected.size > 0 && <button className="ghost" onClick={() => setSelectedState(new Set())}>Clear selection</button>}
-      <button className="primary" disabled={!connected || running || selected.size === 0} onClick={() => setDialogPaths(selectedPaths)}>Review &amp; clean</button>
+      <button className="primary" disabled={!connected || running || selected.size === 0} onClick={() => { setManualDialog(false); setDialogPaths(selectedPaths); }}>Review &amp; clean</button>
     </div>
-    {dialogPaths && <CleanupDialog paths={dialogPaths} onClose={() => setDialogPaths(null)} onDone={outcome => {
-      const moved = new Set(outcome.items.filter(item => item.moved).map(item => item.path.toLowerCase()));
-      setSelectedState(previous => new Set([...previous].filter(path => !moved.has(path.toLowerCase()))));
-    }} />}
+    {dialog}
   </div>;
 }

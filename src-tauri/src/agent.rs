@@ -16,7 +16,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::service::Service;
 
 const CLIENT_HEADER: &str = "x-orphan-cleaner-client";
-const TRANSPORT_VERSION: u32 = 2;
+const TRANSPORT_VERSION: u32 = 3;
 
 #[derive(Clone)]
 struct AgentState {
@@ -48,7 +48,7 @@ fn require_host(headers: &HeaderMap, hosts: &[String]) -> Result<(), ApiError> {
 }
 
 fn require_client(headers: &HeaderMap) -> Result<(), ApiError> {
-    if headers.get(CLIENT_HEADER).and_then(|value| value.to_str().ok()) == Some("web-v2") {
+    if headers.get(CLIENT_HEADER).and_then(|value| value.to_str().ok()) == Some("web-v3") {
         Ok(())
     } else {
         Err(ApiError { status: StatusCode::FORBIDDEN, message: "Missing cleaner-agent client header".into() })
@@ -98,7 +98,9 @@ async fn events(headers: HeaderMap, State(state): State<AgentState>) -> Result<S
                         .data(serde_json::to_string(&payload).unwrap_or_else(|_| "null".into()));
                     yield Ok(event);
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    yield Ok(Event::default().event("scan-resync").data("{}"));
+                },
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -122,9 +124,18 @@ pub async fn run() -> Result<(), String> {
     if !matches!(address.ip(), IpAddr::V4(ip) if ip.is_loopback()) && !matches!(address.ip(), IpAddr::V6(ip) if ip.is_loopback()) {
         return Err("The cleaner agent only binds to a loopback address".into());
     }
-    let local = cleaner_core::local_app_data_path()
-        .ok_or("Windows Local AppData could not be resolved")?
-        .join("dev.orphancleaner.desktop");
+    let local = match std::env::var_os("ORPHAN_CLEANER_DATA_DIR") {
+        Some(path) => {
+            let path = std::path::PathBuf::from(path);
+            if !path.is_absolute() || path.to_string_lossy().starts_with(r"\\") {
+                return Err("The agent data directory must be a local absolute path".into());
+            }
+            path
+        }
+        None => cleaner_core::local_app_data_path()
+            .ok_or("Windows Local AppData could not be resolved")?
+            .join("dev.orphancleaner.desktop"),
+    };
     let downloads = cleaner_core::downloads_path().ok_or("Windows Downloads could not be resolved")?;
     // Scan results arrive in bursts; a deep buffer keeps slow browsers from lagging out.
     let (events_tx, _) = broadcast::channel::<(&'static str, Value)>(8192);
@@ -158,9 +169,9 @@ mod tests {
     fn client_header_is_required() {
         let mut headers = HeaderMap::new();
         assert_eq!(require_client(&headers).unwrap_err().status, StatusCode::FORBIDDEN);
-        headers.insert(CLIENT_HEADER, HeaderValue::from_static("web-v1"));
-        assert!(require_client(&headers).is_err(), "old clients are rejected after the transport change");
         headers.insert(CLIENT_HEADER, HeaderValue::from_static("web-v2"));
+        assert!(require_client(&headers).is_err(), "old clients are rejected after the transport change");
+        headers.insert(CLIENT_HEADER, HeaderValue::from_static("web-v3"));
         assert!(require_client(&headers).is_ok());
     }
 
