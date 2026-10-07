@@ -4523,6 +4523,8 @@ dependencies = [
  "tauri-build",
  "tokio",
  "tower-http",
+ "windows",
+ "winreg",
 ]
 
 [[package]]

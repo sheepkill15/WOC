@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const RETAINED_SCANS: usize = 10;
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,8 +151,17 @@ fn initialize_db(conn: &Connection) -> Result<(), String> {
              SELECT original_path, COALESCE((SELECT MAX(id) FROM scan_sessions), 0)
              FROM quarantine_items WHERE status IN ('quarantined', 'purged');"
         ).map_err(err)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(err)?;
     }
+    if version < 4 {
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS folder_links (path TEXT PRIMARY KEY COLLATE NOCASE, application_json TEXT NOT NULL);").map_err(err)?;
+    }
+    if version < 5 {
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS maintenance_backups (
+            id INTEGER PRIMARY KEY, entry_json TEXT NOT NULL, action TEXT NOT NULL,
+            status TEXT NOT NULL, created_at_unix INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT ''
+        );").map_err(err)?;
+    }
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION).map_err(err)?;
     Ok(())
 }
 
@@ -200,13 +209,19 @@ fn load_scan(conn: &Connection, id: i64, captured_at: i64, inventory_json: Strin
         let json = json.map_err(err)?;
         results.push(serde_json::from_str(&json).map_err(|error| format!("Saved result is unreadable: {error}"))?);
     }
-    Ok(SavedScan {
+    let mut scan = SavedScan {
         captured_at_unix: captured_at as u64,
         inventory: serde_json::from_str(&inventory_json).map_err(|error| format!("Saved inventory is unreadable: {error}"))?,
         summary: serde_json::from_str(&summary_json).map_err(|error| format!("Saved summary is unreadable: {error}"))?,
         results,
         references: references_json.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default(),
-    })
+    };
+    let links = crate::folder_links::list_from(conn)?;
+    for result in &mut scan.results {
+        crate::folder_links::apply(result, &links, &scan.inventory);
+        cleaner_core::finalize(result);
+    }
+    Ok(scan)
 }
 
 type SessionRow = (i64, i64, String, String, Option<String>);
@@ -442,7 +457,7 @@ mod tests {
         assert_eq!(loaded.captured_at_unix, 5);
         assert!(loaded.references.references.is_empty());
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

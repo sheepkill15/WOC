@@ -3,6 +3,8 @@ export type Application = {
   displayIconExecutable?: string | null; packageFamilyName: string | null; sources: string[];
 };
 export type Inventory = { applications: Application[]; warnings: string[] };
+export type FolderLink = { path: string; application: Application };
+export type UninstallReview = { token: string; plan: { application: Application; executable: string; arguments: string; source: string; folders: string[]; excludedFolders: string[] } };
 export type Evidence = { kind: string; description: string; strength: string };
 export type Safety = "safe" | "likely_safe" | "review" | "preserve" | "unknown";
 export type ContentItem = {

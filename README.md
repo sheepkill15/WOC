@@ -40,15 +40,25 @@ cargo check --workspace --all-targets
 
 ## What the app does
 
-**Pages.** Overview · Cleanup · Uninstalled apps · All folders · References · Installed apps · Quarantine · Ignore rules · Folder analyzer · Settings. Light, dark and system themes.
+**Main views.** **Applications** is the default view: each installed application has a measured total and an expandable list of all detected folders. Nested folders count once; separately detected folders of other owners are excluded from the total. **Stray folders** collects folders without a current installed owner, including former-app data with a badge and an explanation of its previous owner. Unknown, shared and Windows-managed data retain their safety labels. Overview, Cleanup, References, Quarantine, Ignore rules, Folder analyzer and Settings remain supporting tools. Light, dark and system themes.
+
+**Manual connections.** Open a folder and choose **Connect to application**, or use **Connect** beside an application's folder. Exact folder links persist in SQLite and apply immediately and on future scans. Removing a manual connection restores the scanner's detected relationship. If the connected app disappears from a complete inventory, its data becomes former-app data. Connections change ownership evidence, never content preservation rules.
+
+**Whole-application uninstall.** Expand an application and choose **Uninstall and remove folders**. Review its Windows registry uninstaller, or a unique direct `uninstall.exe` / `unins*.exe` in its registered installation folder. MSI maintenance commands use `/X`; MSIX apps use Windows package removal. Run the uninstaller, finish its prompts, then check remaining folders. The backend verifies that the app is absent before planning and again before executing cleanup. Remaining exclusive folders move to the existing quarantine after review; shared/system folders and parents containing unrelated detected data are excluded. Installation files not covered by an older scan are also checked. Canceling an uninstaller or an incomplete inventory prevents this cleanup. Some installers require administrator approval, and moving protected folders may still fail for permissions. Restoring quarantined folders does not reinstall the application.
+
+**Startup items.** Read the current-user and all-users Run / RunOnce registry entries and resolved Windows Startup folders without running their commands. Entries show their source, target, associated application when known, and Windows startup status when available. Review a disable action to save the exact registry value type/bytes or ordinary startup file (up to 1 MB) in SQLite before removing it from its startup location. Disabled entries remain listed and can be restored after restarting the app. Separate Windows disable settings are preserved; Windows Startup settings handles packaged apps and other startup mechanisms. RunOnce entries may be installation work, and restoring them may run the command at the next sign-in. Administrator permissions may be required for all-users entries.
+
+**Registry cleaner.** A separate fresh check of Run, RunOnce and App Paths identifies exact missing executable targets on available fixed local drives. Ambiguous unquoted commands, relative targets, inaccessible paths, links, network/removable drives and Windows targets are excluded from cleanup. Review selected values, save their exact contents in SQLite, then remove only those values; keys, siblings, services, COM registrations and file associations remain intact. Values and target existence are checked again before each removal. Startup files are disabled through Startup items, not registry cleanup. This does not promise a performance improvement or a large disk-space saving.
+
+**Startup/registry backups.** Schema v5 records a durable pending backup before changing Windows and retains it separately from folder quarantine, without automatic expiry. The Backups tab offers recovery after interruption as well as normal restoration. Restore rejects different existing values/files; it does not recreate registry keys that an uninstaller has removed. Startup file changes lock the file and its parent directories against replacement and refuse junctions/reparse points. Only disposable test entries/files are changed by validation.
 
 **Scan modes** (spec §29)
 
-- *Quick*: AppData (Local, Roaming, LocalLow), ProgramData, the user's Downloads, Public files, and other `Downloads` folders found at the root or one level below the root of fixed drives, plus the installed-application inventory and system references. It may take longer when Downloads contains many files.
+- *Quick*: AppData (Local, Roaming, LocalLow), ProgramData, the user's Downloads, Public files, other `Downloads` folders found at the root or one level below the root of fixed drives, and exact registered installation folders, plus the installed-application inventory and system references. It may take longer when installations or Downloads contain many files.
 - *Deep*: adds Program Files folders on fixed drives, all top-level user-profile folders except AppData (already covered), Documents, Desktop, Pictures, Music, Videos and Saved Games (including redirected Known Folders), top-level `Temp` folders on fixed drives, and exact registered install folders not already covered by another root, plus executable metadata. Loose files in the profile root and redirected-folder containers are included. Personal folders are never recommended for cleanup; you can still remove them through explicit manual cleanup. Fixed-drive discovery skips removable and network drives.
 - *Post-uninstall check*: when applications disappear from the inventory, re-measures only the folders previously linked to them. Offered on launch and on the Uninstalled apps page. Not saved as a snapshot.
 
-Directories are measured on a small worker pool (at most four threads, to limit disk thrashing) and results stream to the UI while the scan runs. File contents are never read.
+Directories are measured on a small worker pool (at most four threads, to limit disk thrashing) and results stream to the UI while the scan runs. Folder measurement does not read file contents. Startup management reads supported startup files to make exact restorable backups.
 
 **Inventory.** Per-user and machine uninstall registry entries in both registry views, plus current-user MSIX/AppX packages. A missing registry key no longer counts as an incomplete inventory (this used to block saving scans on machines without per-user installs).
 
@@ -77,7 +87,7 @@ Items move with a single rename into a quarantine on their source volume: `%LOCA
 
 **Folder analyzer** (spec §39). Pick any folder in the browser or desktop webview: largest and oldest files, file types, empty folders, regenerable project artifacts (`node_modules`, build output, virtualenvs, caches) and duplicate files confirmed by SHA-256. Read-only.
 
-**Public folder data.** *Update folder data* downloads read-only path hints from the [Ludusavi manifest](https://github.com/mtkennerly/ludusavi-manifest) and [Winapp2](https://github.com/MoscaDotTo/Winapp2), cached locally with ETags. Ludusavi game paths mark data as Preserve; Winapp2 rules only describe possible cache/log paths. Neither source authorizes removal. Ludusavi's repository is MIT-licensed but compiled partly from PCGamingWiki (CC BY-NC-SA); Winapp2 is CC BY-SA 4.0. Review those terms before redistributing a derived catalog.
+**Public folder data.** Every scan automatically checks the [Ludusavi manifest](https://github.com/mtkennerly/ludusavi-manifest) and [Winapp2](https://github.com/MoscaDotTo/Winapp2) for updated path hints, using cached ETags. Download failures retain the last cache and add warnings without preventing an offline scan. Settings also offers *Update folder data*. Ludusavi game paths mark data as Preserve; Winapp2 rules only describe possible cache/log paths. Neither source authorizes removal. Ludusavi's repository is MIT-licensed but compiled partly from PCGamingWiki (CC BY-NC-SA); Winapp2 is CC BY-SA 4.0. Review those terms before redistributing a derived catalog.
 
 **Diagnostics and logging** (spec §41). A rotating log (`logs\cleaner.log`, user-profile paths redacted) records scans and every quarantine, restore and purge. *Export diagnostics* writes a JSON file to Downloads with the retained scans, references, public-data status and recent log lines; profile and app-data prefixes are redacted and executable file names removed. The Settings page lists exactly what it contains.
 
@@ -103,13 +113,15 @@ The `ownership_corpus` integration test runs every case through the same `classi
 | `src-tauri/src/scan_job.rs` | Scan pipeline, removed-app detection, post-uninstall check |
 | `src-tauri/src/candidates.rs` | Candidate grouping and ignore rules |
 | `src-tauri/src/cleanup.rs` | Cleanup plans, quarantine, restore, purge, retention |
-| `src-tauri/src/storage.rs` | SQLite schema v3 (scans, rules, quarantine, cleanup exclusions, actions, settings) |
+| `src-tauri/src/storage.rs` | SQLite schema v5 (scans, folder connections, rules, quarantine, cleanup exclusions, startup/registry backups, actions, settings) |
+| `src-tauri/src/maintenance.rs` | Reviewed startup management, missing registry targets, durable backups and restore |
+| `src-tauri/src/folder_links.rs`, `src-tauri/src/uninstall.rs` | Persistent ownership connections and reviewed uninstall workflow |
 | `src/` | React UI (`store.tsx` state, `views/` pages) |
 
 ## Known limits
 
 - Authenticode signer verification is not implemented; executable metadata comes from the version resource only.
-- Registry entries, services and scheduled tasks are reported but never modified.
+- Startup Run/RunOnce and Startup-folder entries can be disabled/restored. Registry cleanup is limited to missing Run/RunOnce and App Paths values; services, scheduled tasks, COM and file associations remain review-only.
 - Quarantine uses the source drive; the app must be able to create its managed quarantine directory there.
 - ProgramData and Program Files items usually need administrator rights to move; the app reports that instead of elevating.
 - The browser Folder analyzer cannot see Windows application folders; use the desktop app or the agent for ownership analysis.

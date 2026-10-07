@@ -8,6 +8,7 @@ import type { DirectoryResult } from "./types";
 import { Badge, Checkbox, Icon, SizeBar } from "./ui";
 import { CleanupDialog } from "./CleanupDialog";
 import { remainingCleanupSelection } from "./cleanupSelection";
+import { FolderLinkDialog } from "./FolderLinkDialog";
 
 export function ReasonList({ reasons }: { reasons: { tone: string; text: string }[] }) {
   if (!reasons.length) return null;
@@ -23,6 +24,7 @@ export function DirectoryDetails({ result, onClose }: { result: DirectoryResult;
   const { openPath, addRule, backend, running } = useCleaner();
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const [cleanupPaths, setCleanupPaths] = useState<string[] | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const badge = statusBadge(result);
   const assessment = result.assessment;
   const items = result.content?.items ?? [];
@@ -113,6 +115,7 @@ export function DirectoryDetails({ result, onClose }: { result: DirectoryResult;
     </div>
 
     <div className="details-actions">
+      <button className="secondary" disabled={!connected || running} onClick={() => setConnecting(true)}>Connect to application…</button>
       <button className="secondary" disabled={!connected} onClick={() => void openPath(result.path)}><Icon name="open" size={15} /> Open folder</button>
       {connected && <button className="secondary" disabled={running || selection.size === 0} onClick={() => setCleanupPaths([...selection])}>Clean selected ({selection.size})</button>}
       {connected && <button className="ghost danger-text" disabled={running} onClick={() => setCleanupPaths([result.path])}><Icon name="quarantine" size={15} /> Quarantine folder…</button>}
@@ -128,5 +131,6 @@ export function DirectoryDetails({ result, onClose }: { result: DirectoryResult;
     {cleanupPaths && <CleanupDialog manual paths={cleanupPaths} onClose={() => setCleanupPaths(null)} onDone={outcome => {
       setSelection(previous => remainingCleanupSelection(previous, outcome));
     }} />}
+    {connecting && <FolderLinkDialog folder={result} onClose={() => setConnecting(false)} />}
   </div>;
 }

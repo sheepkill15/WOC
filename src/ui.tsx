@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from "react";
 import type { Tone } from "./format";
 
 const iconPaths: Record<string, ReactNode> = {
+  registry: <><path d="M5 5h14v14H5zM9 5v14M9 10h10M9 15h10" /><path d="M3 3h4M17 21h4" /></>,
   overview: <><rect x="3" y="3" width="7" height="9" rx="1.5" /><rect x="14" y="3" width="7" height="5" rx="1.5" /><rect x="14" y="12" width="7" height="9" rx="1.5" /><rect x="3" y="16" width="7" height="5" rx="1.5" /></>,
   cleanup: <><path d="M4 20h16" /><path d="M7 20l1.5-7h7L17 20" /><path d="M12 13V4" /><path d="M9.5 6.5L12 4l2.5 2.5" /></>,
   uninstalled: <><path d="M21 8l-9-5-9 5 9 5 9-5z" /><path d="M3 8v8l9 5 9-5V8" /><path d="M15 15l4 4M19 15l-4 4" /></>,

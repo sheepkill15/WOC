@@ -277,6 +277,9 @@ pub fn installed_applications() -> Inventory {
         Ok(mut packages) => applications.append(&mut packages),
         Err(warning) => warnings.push(warning),
     }
+    // AppX can list multiple architecture/resource variants of the same family.
+    let mut identities = HashSet::new();
+    applications.retain(|app| identities.insert(app.id.to_lowercase()));
     applications.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Inventory { applications, warnings }
 }
@@ -575,6 +578,12 @@ pub fn shortcut_roots() -> Vec<PathBuf> {
     shortcut_directories().into_iter().map(|(_, path, _)| path).collect()
 }
 
+/// Resolved Windows Startup folders, including their all-users scope.
+pub fn startup_directories() -> Vec<(PathBuf, bool)> {
+    shortcut_directories().into_iter().filter(|(kind, _, _)| *kind == "startup_folder")
+        .map(|(_, path, machine_wide)| (path, machine_wide)).collect()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScanMode {
@@ -727,9 +736,8 @@ fn scan_roots_with_apps(mode: ScanMode, apps: &[Application]) -> (Vec<ScanRoot>,
         expected += 1;
         roots.push(root);
     }
-    if mode == ScanMode::Deep {
-        expected += add_registered_install_roots(&mut roots, &drives, apps);
-    }
+    // Application totals include registered installation files in both scan modes.
+    expected += add_registered_install_roots(&mut roots, &drives, apps);
     let mut seen = HashSet::new();
     let before = roots.len();
     roots.retain(|root| seen.insert(root.path.to_string_lossy().to_lowercase()));

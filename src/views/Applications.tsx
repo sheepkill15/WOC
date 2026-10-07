@@ -1,58 +1,59 @@
 import { useMemo, useState } from "react";
 import { useCleaner } from "../store";
-import { formatBytes } from "../format";
+import { formatBytes, safetyLabels, safetyTone, shortPath } from "../format";
 import { Badge, Empty, Icon, Notice, PageHeader } from "../ui";
+import { applicationCatalog } from "../applicationCatalog";
+import { DirectoryDetails } from "../DirectoryDetails";
+import { FolderLinkDialog } from "../FolderLinkDialog";
+import { UninstallDialog } from "../UninstallDialog";
+import type { Application, DirectoryResult } from "../types";
 
-export function Applications({ openFolder }: { openFolder: (path: string) => void }) {
-  const { apps, results, inventoryWarnings, openPath, backend, references } = useCleaner();
+export function Applications() {
+  const { apps, results, inventoryWarnings, backend, running, folderLinks } = useCleaner();
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"name" | "data">("data");
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [link, setLink] = useState<DirectoryResult | null>(null);
+  const [uninstall, setUninstall] = useState<Application | null>(null);
   const connected = backend === "tauri" || backend === "agent";
-  const linked = useMemo(() => {
-    const map = new Map<string, { bytes: number; paths: string[] }>();
-    for (const result of results) {
-      if (!result.owner || result.orphanStatus !== "not_orphaned") continue;
-      const entry = map.get(result.owner.id) ?? { bytes: 0, paths: [] };
-      if (!result.parentPath) entry.bytes += result.sizeBytes;
-      entry.paths.push(result.path);
-      map.set(result.owner.id, entry);
-    }
-    return map;
-  }, [results]);
-  const referenceCounts = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const reference of references?.references ?? []) if (reference.owner) map.set(reference.owner.id, (map.get(reference.owner.id) ?? 0) + 1);
-    return map;
-  }, [references]);
-  const visible = useMemo(() => apps.filter(app => `${app.name} ${app.publisher ?? ""}`.toLowerCase().includes(query.toLowerCase()))
-    .sort((left, right) => sort === "name" ? left.name.localeCompare(right.name) : (linked.get(right.id)?.bytes ?? 0) - (linked.get(left.id)?.bytes ?? 0)), [apps, query, sort, linked]);
-
+  const catalog = useMemo(() => applicationCatalog(apps, results), [apps, results]);
+  const visible = useMemo(() => catalog.entries.filter(entry => `${entry.application.name} ${entry.application.publisher ?? ""} ${entry.folders.map(folder => folder.path).join(" ")}`.toLowerCase().includes(query.toLowerCase()))
+    .sort((left, right) => sort === "name" ? left.application.name.localeCompare(right.application.name) : right.bytes - left.bytes || left.application.name.localeCompare(right.application.name)), [catalog, query, sort]);
+  const selectedFolder = results.find(folder => folder.path === selected);
   return <div className="page page-wide">
-    <PageHeader title="Installed apps" description="For reference only: everything Windows lists as installed, with the data folders linked to each. Click a size to see those folders." />
+    <PageHeader title="Applications" description="Installed applications, their measured total size, and every detected folder connected to them. Expand an application to review its folders or uninstall it." />
     {inventoryWarnings.map((warning, index) => <Notice key={index} tone="warn">{warning}</Notice>)}
     <div className="toolbar">
-      <div className="tabs"><button className="selected">Applications<span>{apps.length}</span></button></div>
+      <span className="muted small">{catalog.entries.length} applications · {formatBytes(catalog.entries.reduce((sum, entry) => sum + entry.bytes, 0))} measured</span>
       <div className="toolbar-controls">
-        <select value={sort} onChange={event => setSort(event.target.value as "name" | "data")} aria-label="Sort"><option value="data">Most linked data</option><option value="name">By name</option></select>
-        <div className="search"><Icon name="analyzer" size={15} /><input placeholder="Search apps or publishers" value={query} onChange={event => setQuery(event.target.value)} aria-label="Search applications" /></div>
+        <select value={sort} onChange={event => setSort(event.target.value as "name" | "data")} aria-label="Sort applications"><option value="data">Largest first</option><option value="name">By name</option></select>
+        <div className="search"><Icon name="analyzer" size={15} /><input placeholder="Search apps, publishers or folders" value={query} onChange={event => setQuery(event.target.value)} aria-label="Search applications" /></div>
       </div>
     </div>
-    <div className="table-wrap">
-      <table>
-        <thead><tr><th>Application</th><th>Version</th><th>Linked data</th><th>References</th><th>Source</th><th /></tr></thead>
-        <tbody>{visible.map(app => {
-          const data = linked.get(app.id);
-          return <tr key={app.id}>
-            <td className="cell-path"><strong>{app.name}</strong><small>{app.publisher ?? "Unknown publisher"}</small></td>
-            <td className="cell-muted">{app.version ?? "—"}</td>
-            <td>{data ? <button className="link" onClick={() => openFolder(data.paths[0])}>{formatBytes(data.bytes)} · {data.paths.length} folder{data.paths.length === 1 ? "" : "s"}</button> : <span className="muted">—</span>}</td>
-            <td className="cell-muted">{referenceCounts.get(app.id) ?? 0}</td>
-            <td>{app.packageFamilyName ? <Badge tone="info">MSIX</Badge> : <Badge tone="muted">{app.sources[0]?.split(" ")[0] ?? "Registry"}</Badge>}</td>
-            <td className="cell-actions">{app.installLocation && <button className="icon-button" title={`Open ${app.installLocation}`} disabled={!connected} onClick={() => void openPath(app.installLocation!)}><Icon name="open" size={15} /></button>}</td>
-          </tr>;
-        })}</tbody>
-      </table>
-      {visible.length === 0 && <Empty icon="apps" title="No applications">{apps.length ? "Nothing matches the search." : "The installed-application inventory is empty."}</Empty>}
+    <p className="muted small">Totals count nested folders once and exclude separately detected data belonging to other owners. {running ? "Sizes update as the scan runs." : "Scan again to include installation files in older results."} Unreadable entries can make sizes incomplete.</p>
+    <div className={`content-grid ${selectedFolder ? "has-details" : ""}`}>
+      <div className="application-list">
+        {visible.map(({ application: app, folders, bytes }) => <section className="application-card" key={app.id}>
+          <button className="application-heading" aria-expanded={expanded === app.id} onClick={() => setExpanded(expanded === app.id ? null : app.id)}>
+            <Icon name="chevron" size={16} /><div className="application-name"><strong>{app.name}</strong><small>{[app.publisher, app.version].filter(Boolean).join(" · ") || "Unknown publisher"}</small></div>
+            <div className="application-size"><strong>{folders.length ? formatBytes(bytes) : "Not measured"}</strong><small>{folders.length} detected folders</small></div>
+          </button>
+          {expanded === app.id && <div className="application-body">
+            {folders.length ? <ul className="application-folders">{folders.map(folder => <li key={folder.path}>
+              <button className="folder-label link" title={folder.path} onClick={() => setSelected(folder.path)}><strong>{shortPath(folder.path)}</strong><small>{folder.path}</small></button>
+              <span>{formatBytes(folder.sizeBytes)}</span>
+              <Badge tone={safetyTone(folder.assessment?.deletionSafety || "unknown")}>{safetyLabels[folder.assessment?.deletionSafety || "unknown"]}</Badge>
+              <button className="ghost" disabled={!connected || running} onClick={() => setLink(folder)}>{folderLinks.some(link => link.path.toLowerCase() === folder.path.toLowerCase()) ? "Manual connection" : "Connect…"}</button>
+            </li>)}</ul> : <p className="muted small">No folders measured yet. Run a scan to discover the installation and application data.</p>}
+            <div className="application-actions"><button className="secondary danger-text" disabled={!connected || running} onClick={() => setUninstall(app)}><Icon name="uninstalled" size={15} /> Uninstall and remove folders…</button></div>
+          </div>}
+        </section>)}
+        {visible.length === 0 && <Empty icon="apps" title="No applications">{apps.length ? "Nothing matches the search." : "Connect the Windows backend to read installed applications."}</Empty>}
+      </div>
+      {selectedFolder && <aside className="details-panel"><DirectoryDetails key={selectedFolder.path} result={selectedFolder} onClose={() => setSelected(null)} /></aside>}
     </div>
+    {link && <FolderLinkDialog folder={link} onClose={() => setLink(null)} />}
+    {uninstall && <UninstallDialog application={uninstall} onClose={() => setUninstall(null)} />}
   </div>;
 }

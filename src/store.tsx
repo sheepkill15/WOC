@@ -1,10 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { call, connectBackend, disconnectBackend, listenBackend, type BackendKind } from "./backend";
 import { mergeScanResults, needsScanSync } from "./scanSync";
+import { resultsAfterCleanup, sameApp } from "./applicationCatalog";
 import type {
   AppInfo, Application, CandidateReport, CleanupOutcome, CleanupPlan, DefinitionsStatus, DiagnosticsExport, DirectoryResult,
   HistoryReport, IgnoreRule, Inventory, PostUninstallReport, PublicDataStatus, QuarantineReport, ReferenceInventory,
   RemovedReport, SavedScan, ScanFinishedEvent, ScanSummary, ScanState, ScanStatus, Settings,
+  FolderLink, UninstallReview,
 } from "./types";
 
 export type BackendState = BackendKind | "connecting" | "unavailable";
@@ -34,6 +36,7 @@ type CleanerState = {
   publicData: PublicDataStatus | null;
   definitions: DefinitionsStatus | null;
   toasts: Toast[];
+  folderLinks: FolderLink[];
 };
 
 type CleanerActions = {
@@ -45,14 +48,18 @@ type CleanerActions = {
   refreshQuarantine(): Promise<void>;
   addRule(kind: IgnoreRule["kind"], value: string, label: string): Promise<void>;
   removeRule(id: number): Promise<void>;
-  planCleanup(paths: string[], manualCleanup: boolean): Promise<CleanupPlan>;
-  executeCleanup(plan: CleanupPlan, acknowledgeWarnings: boolean): Promise<CleanupOutcome>;
+  planCleanup(paths: string[], manualCleanup: boolean, uninstallToken?: string): Promise<CleanupPlan>;
+  executeCleanup(plan: CleanupPlan, acknowledgeWarnings: boolean, uninstallToken?: string): Promise<CleanupOutcome>;
   restore(id: number): Promise<void>;
   purge(id: number): Promise<void>;
   saveSettings(settings: Settings): Promise<void>;
   updatePublicData(): Promise<void>;
   exportDiagnostics(): Promise<DiagnosticsExport | null>;
   openPath(path: string): Promise<void>;
+  connectFolder(path: string, applicationId: string | null): Promise<void>;
+  planUninstall(applicationId: string): Promise<UninstallReview>;
+  launchUninstall(token: string): Promise<void>;
+  finishUninstall(token: string): Promise<string[]>;
   notify(text: string, tone?: Toast["tone"]): void;
   dismissToast(id: number): void;
 };
@@ -93,6 +100,7 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
   const [publicData, setPublicData] = useState<PublicDataStatus | null>(null);
   const [definitions, setDefinitions] = useState<DefinitionsStatus | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [folderLinks, setFolderLinks] = useState<FolderLink[]>([]);
   const [nonce, setNonce] = useState(0);
   const buffer = useRef<DirectoryResult[]>([]);
   const scanStatus = useRef<ScanStatus>({ runId: 0, running: false, resultCount: 0 });
@@ -117,14 +125,16 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const loadDerived = useCallback(async () => {
-    const [historyReport, candidateReport, ruleList] = await Promise.all([
+    const [historyReport, candidateReport, ruleList, links] = await Promise.all([
       call<HistoryReport>("load_history_report"),
       call<CandidateReport>("load_candidates"),
       call<IgnoreRule[]>("list_ignore_rules"),
+      call<FolderLink[]>("list_folder_links"),
     ]);
     setHistory(historyReport);
     setCandidates(candidateReport);
     setRules(ruleList);
+    setFolderLinks(links);
   }, []);
 
   const refreshQuarantine = useCallback(async () => {
@@ -186,6 +196,7 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
               if (!mounted || epoch !== syncEpoch.current || scanStatus.current.runId !== snapshot.runId) return;
               if (saved && (finished.savedAtUnix || finished.summary.canceled)) showSaved(saved);
               setRemoved(removedReport);
+              setPublicData(await call<PublicDataStatus>("public_data_status"));
               completedRun = snapshot.runId;
             }
           }
@@ -260,6 +271,8 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
           const ruleList = await call<IgnoreRule[]>("list_ignore_rules").catch(() => []);
           if (mounted) setRules(ruleList);
         }
+        const [currentInventory, links] = await Promise.all([call<Inventory>("installed_applications"), call<FolderLink[]>("list_folder_links")]);
+        if (mounted) { setApps(currentInventory.applications); setInventoryWarnings(currentInventory.warnings); setFolderLinks(links); }
         void call<QuarantineReport>("list_quarantine").then(report => { if (mounted) setQuarantine(report); }).catch(() => {});
         await synchronize();
       } catch (cause) {
@@ -271,6 +284,22 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
   }, [nonce, loadDerived, showSaved, notify]);
 
   const actions: CleanerActions = useMemo(() => ({
+    async connectFolder(path, applicationId) {
+      await call("connect_folder", { path, applicationId });
+      const saved = await call<SavedScan | null>("load_latest_scan");
+      if (saved) setResults(saved.results);
+      await loadDerived();
+      notify(applicationId ? "Folder connected. Future scans will remember it." : "Manual connection removed.", "success");
+    },
+    planUninstall: applicationId => call<UninstallReview>("plan_uninstall", { applicationId }),
+    launchUninstall: token => call<void>("launch_uninstall", { token }),
+    async finishUninstall(token) {
+      const outcome = await call<{ paths: string[]; inventory: Inventory }>("finish_uninstall", { token });
+      setApps(outcome.inventory.applications); setInventoryWarnings(outcome.inventory.warnings);
+      setResults(previous => previous.map(result => result.owner && !outcome.inventory.applications.some(app => sameApp(app, result.owner!))
+        ? { ...result, orphanStatus: "probable_orphan", evidence: [...result.evidence, { kind: "historical_owner", strength: "strong", description: "The application's uninstall was verified against Windows." }] } : result));
+      return outcome.paths;
+    },
     reconnect() { setBackend("connecting"); setBackendError(""); setNonce(value => value + 1); },
     async startScan(mode) {
       syncEpoch.current++;
@@ -312,9 +341,10 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
       try { await call("remove_ignore_rule", { id }); await loadDerived(); }
       catch (cause) { notify(message(cause), "error"); }
     },
-    planCleanup: (paths, manualCleanup) => call<CleanupPlan>("plan_cleanup", { paths, manualCleanup }),
-    async executeCleanup(plan, acknowledgeWarnings) {
-      const outcome = await call<CleanupOutcome>("execute_cleanup", { paths: plan.items.map(item => item.path), manualCleanup: plan.manualCleanup, planToken: plan.planToken, acknowledgeWarnings });
+    planCleanup: (paths, manualCleanup, uninstallToken) => call<CleanupPlan>("plan_cleanup", { paths, manualCleanup, uninstallToken }),
+    async executeCleanup(plan, acknowledgeWarnings, uninstallToken) {
+      const outcome = await call<CleanupOutcome>("execute_cleanup", { paths: plan.items.map(item => item.path), manualCleanup: plan.manualCleanup, planToken: plan.planToken, acknowledgeWarnings, uninstallToken });
+      setResults(previous => resultsAfterCleanup(previous, outcome.items));
       await Promise.all([loadDerived(), refreshQuarantine()]).catch(() => {});
       return outcome;
     },
@@ -353,7 +383,7 @@ export function CleanerProvider({ children }: { children: ReactNode }) {
 
   const value = {
     backend, backendError, appInfo, apps, inventoryWarnings, results, references, summary, savedAt, running, runningMode, progressPath,
-    scanError, history, candidates, removed, postUninstall, quarantine, rules, settings, publicData, definitions, toasts, ...actions,
+    scanError, history, candidates, removed, postUninstall, quarantine, rules, settings, publicData, definitions, toasts, folderLinks, ...actions,
   };
   return <CleanerContext.Provider value={value}>{children}</CleanerContext.Provider>;
 }

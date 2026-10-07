@@ -7,7 +7,7 @@ import { Badge, Icon, Modal, Notice } from "./ui";
 const statusTone = { ready: "good", warning: "warn", blocked: "danger", redundant: "muted" } as const;
 const statusLabel = { ready: "Ready", warning: "Needs confirmation", blocked: "Blocked", redundant: "Already included" } as const;
 
-export function CleanupDialog({ paths, onClose, onDone, manual = false }: { paths: string[]; onClose: () => void; onDone?: (outcome: CleanupOutcome) => void; manual?: boolean }) {
+export function CleanupDialog({ paths, onClose, onDone, manual = false, uninstallToken }: { paths: string[]; onClose: () => void; onDone?: (outcome: CleanupOutcome) => void; manual?: boolean; uninstallToken?: string }) {
   const { planCleanup, executeCleanup, notify } = useCleaner();
   const [plan, setPlan] = useState<CleanupPlan | null>(null);
   const [error, setError] = useState("");
@@ -19,9 +19,9 @@ export function CleanupDialog({ paths, onClose, onDone, manual = false }: { path
   useEffect(() => {
     let active = true;
     setPlan(null); setError(""); setAcknowledged(false);
-    planCleanup(paths, manualCleanup).then(result => { if (active) setPlan(result); }).catch(cause => { if (active) setError(String(cause instanceof Error ? cause.message : cause)); });
+    planCleanup(paths, manualCleanup, uninstallToken).then(result => { if (active) setPlan(result); }).catch(cause => { if (active) setError(String(cause instanceof Error ? cause.message : cause)); });
     return () => { active = false; };
-  }, [paths, planCleanup, manualCleanup]);
+  }, [paths, planCleanup, manualCleanup, uninstallToken]);
 
   const actionable = plan ? plan.items.filter(item => item.status === "ready" || (item.status === "warning" && acknowledged)) : [];
   const actionableBytes = actionable.reduce((sum, item) => sum + item.sizeBytes, 0);
@@ -30,7 +30,7 @@ export function CleanupDialog({ paths, onClose, onDone, manual = false }: { path
     if (!plan) return;
     setExecuting(true);
     try {
-      const result = await executeCleanup(plan, acknowledged);
+      const result = await executeCleanup(plan, acknowledged, uninstallToken);
       setOutcome(result);
       onDone?.(result);
       if (result.movedCount) notify(`Moved ${formatCount(result.movedCount, "item")} (${formatBytes(result.movedBytes)}) to quarantine.`, "success");
@@ -38,7 +38,7 @@ export function CleanupDialog({ paths, onClose, onDone, manual = false }: { path
       setError(String(cause instanceof Error ? cause.message : cause));
       setAcknowledged(false);
       setPlan(null);
-      try { setPlan(await planCleanup(paths, manualCleanup)); }
+      try { setPlan(await planCleanup(paths, manualCleanup, uninstallToken)); }
       catch { /* Keep the execution error visible; no stale plan can be executed. */ }
     } finally {
       setExecuting(false);

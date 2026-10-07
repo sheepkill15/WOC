@@ -27,7 +27,7 @@ export function References() {
 
   return <div className="page page-wide">
     <PageHeader title="References"
-      description="Startup entries, scheduled tasks, services and shortcuts that point to a program. Tick dead shortcuts to move them to quarantine; other entries show where to remove them yourself." />
+      description={<>Saved scan of startup entries, scheduled tasks, services and shortcuts. Manage startup entries in <a href="#/startup">Startup items</a> and missing registry program targets in <a href="#/registry">Registry cleaner</a>. Tick dead shortcuts here to move them to quarantine.</>} />
     {!references && <Empty icon="references" title="No references collected yet">References are collected during each scan.</Empty>}
     {references && <>
       {references.warnings.map((warning, index) => <Notice key={index} tone="warn">{warning}</Notice>)}
@@ -67,7 +67,7 @@ export function References() {
       </div>
       <div className={`selection-bar ${selected.size || (status === "dead" && visible.some(reference => reference.fileBacked)) ? "visible" : ""} ${selected.size ? "" : "idle"}`}>
         {selected.size ? <div><strong>{formatCount(selected.size, "shortcut")} selected</strong><span>They will be moved to quarantine, where you can restore them.</span></div>
-          : <div><strong>Tick the dead shortcuts you want removed</strong><span>Registry entries, services and tasks can't be removed here; copy their location and remove them in their own tool.</span></div>}
+          : <div><strong>Tick the dead shortcuts you want removed</strong><span>Use Startup items or Registry cleaner for supported registry entries. Services and tasks remain review-only.</span></div>}
         {selected.size > 0 && <button className="ghost" onClick={() => setSelected(new Set())}>Clear</button>}
         <button className="primary" disabled={!selected.size} onClick={() => setDialog([...selected])}>Review &amp; clean</button>
       </div>

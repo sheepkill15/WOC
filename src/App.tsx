@@ -4,7 +4,6 @@ import { formatAge, formatBytes } from "./format";
 import { Icon, Notice } from "./ui";
 import { Overview } from "./views/Overview";
 import { Cleanup } from "./views/Cleanup";
-import { Uninstalled } from "./views/Uninstalled";
 import { Inventory } from "./views/Inventory";
 import { References } from "./views/References";
 import { Applications } from "./views/Applications";
@@ -12,13 +11,15 @@ import { Quarantine } from "./views/Quarantine";
 import { Rules } from "./views/Rules";
 import { FolderAnalyzer } from "./views/FolderAnalyzer";
 import { SettingsView, type Theme } from "./views/SettingsView";
+import { applicationCatalog } from "./applicationCatalog";
+import { StartupItems, RegistryCleaner } from "./views/Maintenance";
 
-export type Route = "overview" | "cleanup" | "uninstalled" | "inventory" | "references" | "apps" | "quarantine" | "rules" | "analyzer" | "settings";
-const routes: Route[] = ["overview", "cleanup", "uninstalled", "inventory", "references", "apps", "quarantine", "rules", "analyzer", "settings"];
+export type Route = "overview" | "cleanup" | "uninstalled" | "inventory" | "stray" | "references" | "apps" | "quarantine" | "rules" | "analyzer" | "settings" | "startup" | "registry";
+const routes: Route[] = ["overview", "cleanup", "uninstalled", "inventory", "stray", "references", "apps", "quarantine", "rules", "analyzer", "settings", "startup", "registry"];
 
 function routeFromHash(): Route {
   const value = window.location.hash.replace(/^#\/?/, "") as Route;
-  return routes.includes(value) ? value : "overview";
+  return routes.includes(value) ? value : "apps";
 }
 
 function readTheme(): Theme {
@@ -27,7 +28,7 @@ function readTheme(): Theme {
 
 export default function App() {
   const cleaner = useCleaner();
-  const { backend, backendError, running, runningMode, progressPath, results, savedAt, summary, candidates, removed, references, quarantine, apps, rules, toasts, scanError, inventoryWarnings } = cleaner;
+  const { backend, backendError, running, runningMode, progressPath, results, savedAt, summary, candidates, references, quarantine, apps, rules, toasts, scanError, inventoryWarnings } = cleaner;
   const [route, setRoute] = useState<Route>(routeFromHash);
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [theme, setThemeState] = useState<Theme>(readTheme);
@@ -44,19 +45,20 @@ export default function App() {
   }, [theme]);
   const setTheme = (value: Theme) => { setThemeState(value); try { localStorage.setItem("orphan-cleaner-theme", value); } catch { /* storage unavailable */ } };
   const navigate = useCallback((next: Route) => { window.location.hash = `/${next}`; setRoute(next); document.querySelector(".main")?.scrollTo({ top: 0 }); }, []);
-  const openFolder = useCallback((path: string) => { setFocusPath(path); navigate("inventory"); }, [navigate]);
   const clearFocus = useCallback(() => setFocusPath(null), []);
 
   const deadCount = references?.references.filter(reference => reference.status === "dead").length ?? 0;
   const reviewGroups = candidates?.groups.filter(group => group.priority !== "info").length ?? 0;
+  const strayCount = applicationCatalog(apps, results).stray.length;
   const nav: { section?: string; route: Route; label: string; icon: string; badge?: string | number; tone?: string }[] = [
-    { route: "overview", label: "Overview", icon: "overview" },
+    { route: "apps", label: "Applications", icon: "apps", badge: apps.length || undefined },
+    { route: "stray", label: "Stray folders", icon: "folders", badge: strayCount || undefined },
+    { section: "Tools", route: "overview", label: "Overview", icon: "overview" },
     { route: "cleanup", label: "Cleanup", icon: "cleanup", badge: candidates?.recommendedBytes ? formatBytes(candidates.recommendedBytes) : reviewGroups || undefined, tone: candidates?.recommendedBytes ? "accent" : undefined },
-    { route: "uninstalled", label: "Uninstalled apps", icon: "uninstalled", badge: removed?.applications.length || undefined, tone: "warn" },
     { route: "references", label: "References", icon: "references", badge: deadCount || undefined, tone: deadCount ? "warn" : undefined },
+    { route: "startup", label: "Startup items", icon: "bolt" },
+    { route: "registry", label: "Registry cleaner", icon: "registry" },
     { route: "quarantine", label: "Quarantine", icon: "quarantine", badge: quarantine?.items.length || undefined },
-    { section: "Browse", route: "inventory", label: "All folders", icon: "folders", badge: results.length || undefined },
-    { route: "apps", label: "Installed apps", icon: "apps", badge: apps.length || undefined },
     { route: "analyzer", label: "Folder analyzer", icon: "analyzer" },
     { section: "Preferences", route: "rules", label: "Ignore rules", icon: "rules", badge: rules.length || undefined },
     { route: "settings", label: "Settings", icon: "settings" },
@@ -107,10 +109,12 @@ export default function App() {
       {inventoryWarnings.length > 0 && route === "overview" && <Notice tone="warn">{inventoryWarnings.join(" ")} History-based conclusions are paused until the inventory is complete.</Notice>}
       {route === "overview" && <Overview navigate={navigate} />}
       {route === "cleanup" && <Cleanup />}
-      {route === "uninstalled" && <Uninstalled openFolder={openFolder} />}
+      {(route === "stray" || route === "uninstalled") && <Inventory key="stray" strayOnly focusPath={focusPath} clearFocus={clearFocus} />}
       {route === "inventory" && <Inventory focusPath={focusPath} clearFocus={clearFocus} />}
       {route === "references" && <References />}
-      {route === "apps" && <Applications openFolder={openFolder} />}
+      {route === "startup" && <StartupItems />}
+      {route === "registry" && <RegistryCleaner />}
+      {route === "apps" && <Applications />}
       {route === "quarantine" && <Quarantine navigate={navigate} />}
       {route === "rules" && <Rules />}
       {route === "analyzer" && <FolderAnalyzer connected={connected} />}

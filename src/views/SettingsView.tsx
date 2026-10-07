@@ -38,7 +38,7 @@ export function SettingsView({ theme, setTheme }: { theme: Theme; setTheme: (the
         <label className="check-row"><input type="checkbox" checked={draft.checkRemovedOnLaunch} onChange={event => setDraft({ ...draft, checkRemovedOnLaunch: event.target.checked })} /><span>Check for uninstalled applications when the app starts</span></label>
       </div>
     </Section>}
-    <Section title="Public folder data" description="Optional read-only hints: game save locations from Ludusavi and cache paths from Winapp2. Downloaded only when you ask."
+    <Section title="Public folder data" description="Game save locations from Ludusavi and cache paths from Winapp2. Both databases update automatically before each scan; cached data remains available offline."
       actions={<button className="secondary" disabled={!connected || updating || running} onClick={async () => { setUpdating(true); await updatePublicData(); setUpdating(false); }}>{updating ? "Updating…" : "Update folder data"}</button>}>
       <p className="muted">{publicData?.updatedAtUnix ? `Updated ${formatDate(publicData.updatedAtUnix)}` : "Not downloaded"} · {formatCount(publicData?.gameDirectories ?? 0, "game folder name")} · {formatCount(publicData?.cleanerDirectories ?? 0, "cleaner folder name")}</p>
       {publicData?.warnings.map((warning, index) => <Notice key={index} tone="warn">{warning}</Notice>)}

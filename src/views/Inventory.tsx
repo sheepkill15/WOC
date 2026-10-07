@@ -3,11 +3,17 @@ import { useCleaner } from "../store";
 import { formatAge, formatBytes, ownerLabel, rootLabels, safetyLabels, safetyTone, shortPath, statusBadge, type StatusGroup } from "../format";
 import { Badge, Empty, Icon, PageHeader } from "../ui";
 import { DirectoryDetails } from "../DirectoryDetails";
+import { applicationCatalog, formerOwnerText, sameApp } from "../applicationCatalog";
 
 type SortKey = "size" | "name" | "age";
 
-export function Inventory({ focusPath, clearFocus }: { focusPath: string | null; clearFocus: () => void }) {
-  const { results, running, progressPath, summary, rules, quarantine } = useCleaner();
+export function Inventory({ focusPath, clearFocus, strayOnly = false }: { focusPath: string | null; clearFocus: () => void; strayOnly?: boolean }) {
+  const { results: allResults, apps, inventoryWarnings, running, progressPath, summary, rules, quarantine } = useCleaner();
+  const results = useMemo(() => {
+    if (!strayOnly) return allResults;
+    return applicationCatalog(apps, allResults).stray.map(folder => folder.owner && folder.orphanStatus === "not_orphaned" && !inventoryWarnings.length && !apps.some(app => sameApp(app, folder.owner!))
+      ? { ...folder, orphanStatus: "probable_orphan" } : folder);
+  }, [allResults, apps, inventoryWarnings, strayOnly]);
   const [group, setGroup] = useState<"all" | StatusGroup>("all");
   const [root, setRoot] = useState("all");
   const [query, setQuery] = useState("");
@@ -39,11 +45,11 @@ export function Inventory({ focusPath, clearFocus }: { focusPath: string | null;
   }, [results, group, root, query, sort]);
   const selected = results.find(result => result.path === selectedPath) ?? null;
 
-  const tabs: [typeof group, string][] = [["all", "All"], ["matched", "Installed"], ["former", "Leftovers"], ["unregistered", "Unregistered"], ["known", "Known / Windows"], ["unknown", "Unknown"]];
+  const tabs: [typeof group, string][] = strayOnly ? [["all", "All stray folders"], ["former", "Former app data"], ["unregistered", "Unregistered"], ["known", "Known / Windows"], ["unknown", "Unknown"]] : [["all", "All"], ["matched", "Installed"], ["former", "Leftovers"], ["unregistered", "Unregistered"], ["known", "Known / Windows"], ["unknown", "Unknown"]];
 
   return <div className="page page-wide">
-    <PageHeader title="All folders"
-      description={<>Every folder the {summary?.mode === "deep" ? "deep" : "quick"} scan inspected, with its probable owner. Click a row to see the evidence. To remove something, use <b>Cleanup</b>; “Unknown” does not mean safe to remove.</>} />
+    <PageHeader title={strayOnly ? "Stray folders" : "All folders"}
+      description={strayOnly ? "Detected folders without a current installed owner. Former application data stays here with its history. Open a folder to review, remove it, or connect it to an application." : <>Every folder the {summary?.mode === "deep" ? "deep" : "quick"} scan inspected, with its probable owner. Click a row to see the evidence.</>} />
     {running && <div className="progress-line"><span className="spinner" /><span title={progressPath}>{progressPath || "Preparing…"}</span><b>{results.length.toLocaleString()} folders so far</b></div>}
     <div className="toolbar">
       <div className="tabs">{tabs.map(([key, label]) => <button key={key} className={group === key ? "selected" : ""} onClick={() => setGroup(key)}>{label}<span>{counts[key]}</span></button>)}</div>
@@ -68,7 +74,7 @@ export function Inventory({ focusPath, clearFocus }: { focusPath: string | null;
             const isIgnored = ignored.some(value => lower === value || lower.startsWith(`${value}\\`));
             return <tr key={result.path} className={selectedPath === result.path ? "selected-row" : ""} onClick={() => setSelectedPath(result.path)}
               onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedPath(result.path); } }} tabIndex={0} aria-selected={selectedPath === result.path}>
-              <td className="cell-path"><strong>{result.parentPath ? "↳ " : ""}{shortPath(result.path)}</strong><small title={result.path}>{rootLabels[result.root] ?? result.root}</small></td>
+              <td className="cell-path"><strong>{result.parentPath ? "↳ " : ""}{shortPath(result.path)}</strong><small title={result.path}>{rootLabels[result.root] ?? result.root}</small>{strayOnly && formerOwnerText(result) && <small className="former-owner-text">{formerOwnerText(result)}</small>}</td>
               <td className="cell-num">{formatBytes(result.sizeBytes)}</td>
               <td className="cell-owner" title={ownerLabel(result)}>{ownerLabel(result)}</td>
               <td><Badge tone={badge.tone}>{badge.label}</Badge>{isIgnored && <Badge tone="muted">Ignored</Badge>}{quarantined.has(lower) && <Badge tone="accent">Quarantined</Badge>}</td>

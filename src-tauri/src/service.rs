@@ -4,11 +4,11 @@
 use cleaner_core::{Definitions, ScanMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
-use crate::{candidates, cleanup, diagnostics, history, logging, public_data, scan_job, storage};
+use crate::{candidates, cleanup, diagnostics, folder_links, history, logging, maintenance, public_data, scan_job, storage, uninstall};
 
 pub type Emitter = Arc<dyn Fn(&'static str, Value) + Send + Sync>;
 
@@ -33,6 +33,8 @@ pub struct Service {
     scan_state: Mutex<ScanState>,
     /// Serializes cleanup, restore and purge so plans never race each other.
     cleanup_lock: Mutex<()>,
+    uninstall_plans: Mutex<HashMap<String, (uninstall::UninstallPlan, bool)>>,
+    maintenance_reviews: Mutex<maintenance::Reviews>,
     emit: Emitter,
 }
 
@@ -47,7 +49,7 @@ fn to_value<T: serde::Serialize>(value: T) -> Result<Value, String> {
 
 impl Service {
     pub fn new(app_local_data: PathBuf, downloads: PathBuf, backend: &'static str, emit: Emitter) -> Arc<Self> {
-        Arc::new(Self { app_local_data, downloads, backend, active: Mutex::new(None), scan_state: Mutex::new(ScanState::default()), cleanup_lock: Mutex::new(()), emit })
+        Arc::new(Self { app_local_data, downloads, backend, active: Mutex::new(None), scan_state: Mutex::new(ScanState::default()), cleanup_lock: Mutex::new(()), uninstall_plans: Mutex::new(HashMap::new()), maintenance_reviews: Mutex::new(maintenance::Reviews::default()), emit })
     }
 
     fn database(&self) -> PathBuf { self.app_local_data.join("scans.sqlite3") }
@@ -59,6 +61,88 @@ impl Service {
     pub fn dispatch(self: &Arc<Self>, command: &str, args: &Value) -> Result<Value, String> {
         let root = &self.app_local_data;
         match command {
+            "scan_maintenance" => to_value(self.maintenance_reviews.lock().map_err(|_| "Maintenance reviews are unavailable.")?.scan()),
+            "maintenance_backups" => to_value(maintenance::backups(&self.database())?),
+            "apply_maintenance" => {
+                let _guard = self.cleanup_lock.try_lock().map_err(|_| "Another operation is in progress.")?;
+                if self.is_running() { return Err("Wait for the scan to finish before changing startup or registry entries.".into()); }
+                let token: String = arg(args, "token")?;
+                let ids: Vec<String> = arg(args, "ids")?;
+                let action: String = arg(args, "action")?;
+                let selected = self.maintenance_reviews.lock().map_err(|_| "Maintenance reviews are unavailable.")?.select(&token, &ids, &action)?;
+                let outcomes = maintenance::apply(&self.database(), &selected, &action);
+                for outcome in &outcomes { logging::info(root, &format!("maintenance {action}: {} ({})", outcome.name, if outcome.success { "success" } else { "failed" })); }
+                to_value(outcomes)
+            }
+            "restore_maintenance" => {
+                let _guard = self.cleanup_lock.try_lock().map_err(|_| "Another operation is in progress.")?;
+                if self.is_running() { return Err("Wait for the scan to finish before restoring an entry.".into()); }
+                let id: i64 = arg(args, "id")?;
+                maintenance::restore(&self.database(), id)?;
+                logging::info(root, &format!("maintenance backup restored: {id}"));
+                to_value(json!({ "restored": true }))
+            }
+            "open_startup_settings" => {
+                let app = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+                std::process::Command::new(Path::new(&app).join("explorer.exe")).arg("ms-settings:startupapps").spawn().map_err(|e| e.to_string())?;
+                to_value(json!({ "opened": true }))
+            }
+            "list_folder_links" => to_value(folder_links::list(&self.database())?),
+            "connect_folder" => {
+                let _guard = self.cleanup_lock.try_lock().map_err(|_| "A cleanup is in progress.")?;
+                if self.is_running() { return Err("Wait for the scan to finish before connecting folders.".into()); }
+                let path: String = arg(args, "path")?;
+                let application_id: Option<String> = arg(args, "applicationId")?;
+                let latest = storage::load_latest(&self.database())?.ok_or("Scan folders before connecting them.")?;
+                let result = latest.results.iter().find(|r| r.path.eq_ignore_ascii_case(&path)).ok_or("This folder is not in the latest saved scan.")?;
+                let inventory = cleaner_core::installed_applications();
+                let application = application_id.as_ref().map(|id| inventory.applications.iter().find(|a| &a.id == id).ok_or("The selected application is no longer installed.")).transpose()?;
+                folder_links::save(&self.database(), &result.path, application)?;
+                logging::info(root, &format!("folder connection changed: {}", result.path));
+                to_value(json!({ "saved": true }))
+            }
+            "plan_uninstall" => {
+                let id: String = arg(args, "applicationId")?;
+                let inventory = cleaner_core::installed_applications();
+                if !inventory.warnings.is_empty() { return Err("Application inventory is incomplete; try again when Windows can be read.".into()); }
+                let application = inventory.applications.iter().find(|a| a.id == id).ok_or("This application is no longer installed.")?;
+                let latest = storage::load_latest(&self.database())?;
+                let plan = uninstall::plan(application, latest.as_ref().map(|s| s.results.as_slice()).unwrap_or_default(), &inventory.applications)?;
+                let token = format!("{}-{}", storage::now_unix(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+                let mut plans = self.uninstall_plans.lock().map_err(|_| "Uninstall state is unavailable")?;
+                if plans.len() > 64 { plans.clear(); }
+                plans.insert(token.clone(), (plan.clone(), false));
+                to_value(json!({ "plan": plan, "token": token }))
+            }
+            "launch_uninstall" => {
+                let _guard = self.cleanup_lock.try_lock().map_err(|_| "A cleanup is in progress.")?;
+                if self.is_running() { return Err("Wait for the scan to finish before uninstalling.".into()); }
+                let token: String = arg(args, "token")?;
+                let mut plans = self.uninstall_plans.lock().map_err(|_| "Uninstall state is unavailable")?;
+                let (reviewed, launched) = plans.get_mut(&token).ok_or("Review this application again before uninstalling.")?;
+                if *launched { return Err("This uninstaller has already been started. Check whether it finished.".into()); }
+                let inventory = cleaner_core::installed_applications();
+                let app = inventory.applications.iter().find(|a| a.id == reviewed.application.id).ok_or("This application is no longer installed.")?;
+                let latest = storage::load_latest(&self.database())?;
+                let fresh = uninstall::plan(app, latest.as_ref().map(|s| s.results.as_slice()).unwrap_or_default(), &inventory.applications)?;
+                if fresh != *reviewed { return Err("The uninstaller or linked folders changed. Review this application again.".into()); }
+                uninstall::launch(reviewed)?;
+                *launched = true;
+                logging::info(root, &format!("uninstaller launched: {}", app.name));
+                to_value(json!({ "started": true }))
+            }
+            "finish_uninstall" => {
+                let _guard = self.cleanup_lock.try_lock().map_err(|_| "A cleanup is in progress.")?;
+                if self.is_running() { return Err("Wait for the scan to finish before checking uninstall.".into()); }
+                let token: String = arg(args, "token")?;
+                let plans = self.uninstall_plans.lock().map_err(|_| "Uninstall state is unavailable")?;
+                let (plan, launched) = plans.get(&token).ok_or("This uninstall review has expired.")?;
+                if !launched { return Err("Start the reviewed uninstaller first.".into()); }
+                let inventory = cleaner_core::installed_applications();
+                uninstall::verify(&plan.application, &inventory)?;
+                let paths: Vec<_> = plan.folders.iter().filter(|p| Path::new(p).exists()).cloned().collect();
+                to_value(json!({ "paths": paths, "inventory": inventory }))
+            }
             "scan_state" => to_value(self.scan_state.lock().map_err(|_| "Scan state is unavailable")?.clone()),
             "scan_status" => {
                 let state = self.scan_state.lock().map_err(|_| "Scan state is unavailable")?;
@@ -74,7 +158,21 @@ impl Service {
                 "logFile": logging::log_path(root).to_string_lossy(),
             })),
             "installed_applications" => to_value(cleaner_core::installed_applications()),
-            "load_latest_scan" => to_value(storage::load_latest(&self.database())?),
+            "load_latest_scan" => {
+                let mut scan = storage::load_latest(&self.database())?;
+                let excluded = cleanup::quarantined_paths(root);
+                if let Some(scan) = &mut scan {
+                    let conn = storage::open_db(&self.database())?;
+                    let removed: Vec<_> = excluded.iter().map(|path| {
+                        let saved_size = scan.results.iter().find(|r| r.path.eq_ignore_ascii_case(path)).map(|r| r.size_bytes)
+                            .or_else(|| scan.results.iter().find_map(|r| r.content.items.iter().find(|item| Path::new(&r.path).join(&item.name).to_string_lossy().eq_ignore_ascii_case(path)).map(|item| item.size_bytes)));
+                        let bytes = saved_size.unwrap_or_else(|| conn.query_row("SELECT size_bytes FROM quarantine_items WHERE original_path = ?1 COLLATE NOCASE ORDER BY id DESC LIMIT 1", [path], |row| row.get::<_, i64>(0)).unwrap_or_default().max(0) as u64);
+                        (path.clone(), bytes)
+                    }).collect();
+                    prune_removed_results(&mut scan.results, &removed);
+                }
+                to_value(scan)
+            }
             "load_history_report" => {
                 let (latest, inventories) = storage::load_history_inputs(&self.database())?;
                 to_value(latest.map(|latest| history::build_from(&latest, &inventories)).unwrap_or_default())
@@ -91,11 +189,17 @@ impl Service {
             }
             "detect_removed_applications" => to_value(scan_job::detect_removed(root)?),
             "post_uninstall_scan" => {
+                let _guard = self.cleanup_lock.try_lock().map_err(|_| "Another operation is in progress.")?;
+                if self.is_running() { return Err("Wait for the current scan to finish first.".into()); }
                 let cancel = AtomicBool::new(false);
                 to_value(scan_job::post_uninstall(root, &cancel)?)
             }
             "public_data_status" => public_data::load(root).map(|(_, status)| status).and_then(to_value),
-            "update_public_data" => to_value(public_data::update(root)?),
+            "update_public_data" => {
+                let _guard = self.cleanup_lock.try_lock().map_err(|_| "Another operation is in progress.")?;
+                if self.is_running() { return Err("The running scan is already updating folder databases.".into()); }
+                to_value(public_data::update(root)?)
+            }
             "export_diagnostics" => {
                 let scans = storage::load_recent(&self.database(), storage::RETAINED_SCANS)?;
                 let status = public_data::load(root).map(|(_, status)| status).unwrap_or_default();
@@ -136,6 +240,7 @@ impl Service {
                 let rules = storage::list_ignore_rules(&self.database())?;
                 let manual_cleanup: Option<bool> = arg(args, "manualCleanup")?;
                 let inventory = cleaner_core::installed_applications();
+                self.validate_uninstall_cleanup(args, &paths, &inventory)?;
                 let options = cleanup::PlanOptions { rules: &rules, manual_cleanup: manual_cleanup.unwrap_or(false), inventory_incomplete: !inventory.warnings.is_empty() };
                 to_value(cleanup::plan(root, scan.as_ref(), &paths, &inventory.applications, &options))
             }
@@ -145,6 +250,7 @@ impl Service {
                 let request: cleanup::CleanupRequest = serde_json::from_value(args.clone()).map_err(|error| format!("Invalid cleanup request: {error}"))?;
                 let scan = storage::load_latest(&self.database())?;
                 let inventory = cleaner_core::installed_applications();
+                self.validate_uninstall_cleanup(args, &request.paths, &inventory)?;
                 let rules = storage::list_ignore_rules(&self.database())?;
                 let options = cleanup::PlanOptions { rules: &rules, manual_cleanup: request.manual_cleanup, inventory_incomplete: !inventory.warnings.is_empty() };
                 to_value(cleanup::execute(root, scan.as_ref(), &request, &inventory.applications, &options)?)
@@ -186,6 +292,21 @@ impl Service {
             }
             other => Err(format!("Unknown command: {other}")),
         }
+    }
+
+    fn validate_uninstall_cleanup(&self, args: &Value, paths: &[String], inventory: &cleaner_core::Inventory) -> Result<(), String> {
+        let Some(token) = arg::<Option<String>>(args, "uninstallToken")? else { return Ok(()); };
+        let plans = self.uninstall_plans.lock().map_err(|_| "Uninstall state is unavailable")?;
+        let (plan, launched) = plans.get(&token).ok_or("Uninstall review expired. Review the remaining folders again.")?;
+        if !launched { return Err("The reviewed uninstaller has not been started.".into()); }
+        uninstall::verify(&plan.application, inventory)?;
+        if paths.iter().any(|path| !plan.folders.iter().any(|p| p.eq_ignore_ascii_case(path))) { return Err("The selected folders are outside the reviewed uninstall.".into()); }
+        let latest = storage::load_latest(&self.database())?;
+        if let Some(latest) = latest {
+            let (included, _) = uninstall::removal_folders(&plan.application, &latest.results, &inventory.applications);
+            if paths.iter().any(|path| !included.iter().any(|p| p.eq_ignore_ascii_case(path))) { return Err("Folder ownership changed since the uninstall review. Review the folders again.".into()); }
+        }
+        Ok(())
     }
 
     fn start_scan(self: &Arc<Self>, mode: ScanMode) -> Result<(), String> {
@@ -240,6 +361,28 @@ impl Service {
             emit_value("scan-finished", serde_json::to_value(&finished));
         });
         Ok(())
+    }
+}
+
+fn prune_removed_results(results: &mut Vec<cleaner_core::DirectoryResult>, removed: &[(String, u64)]) {
+    let within = cleaner_core::references::path_is_within;
+    let roots: Vec<_> = removed.iter().filter(|(path, _)| !removed.iter().any(|(parent, _)| !parent.eq_ignore_ascii_case(path) && within(path, parent))).collect();
+    results.retain(|r| !roots.iter().any(|(path, _)| within(&r.path, path)));
+    for result in results {
+        let bytes: u64 = roots.iter().filter(|(path, _)| within(path, &result.path)).map(|(_, bytes)| *bytes).sum();
+        result.size_bytes = result.size_bytes.saturating_sub(bytes);
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    #[test]
+    fn persisted_cleanup_exclusions_also_reduce_parent_totals() {
+        let mut results = vec![cleaner_core::DirectoryResult { path: r"C:\App".into(), size_bytes: 100, ..Default::default() }, cleaner_core::DirectoryResult { path: r"C:\App\Cache".into(), size_bytes: 30, ..Default::default() }];
+        prune_removed_results(&mut results, &[(r"c:\app\cache".into(), 30)]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].size_bytes, 70);
     }
 }
 

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
-use crate::{history, logging, public_data, storage};
+use crate::{folder_links, history, logging, public_data, storage};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +71,11 @@ where
     P: FnMut(String),
 {
     logging::info(&local_data_dir, &format!("{} scan started", mode.as_str()));
+    on_progress("Updating Ludusavi and Winapp2 folder databases".into());
+    let update_warnings = match public_data::update(&local_data_dir) {
+        Ok(status) => status.warnings,
+        Err(error) => vec![format!("Folder databases: {error}; using cached data.")],
+    };
     on_progress("Reading installed applications".into());
     let mut inventory = cleaner_core::installed_applications();
     let database = local_data_dir.join("scans.sqlite3");
@@ -80,6 +85,10 @@ where
             inventory.warnings.push(format!("Historical scan could not be loaded: {error}"));
             None
         }
+    };
+    let links = match folder_links::list(&database) {
+        Ok(links) => links,
+        Err(error) => { inventory.warnings.push(format!("Manual folder connections could not be loaded: {error}")); Vec::new() }
     };
     on_inventory(&inventory);
     on_progress("Reading startup entries, services, scheduled tasks and shortcuts".into());
@@ -100,14 +109,16 @@ where
         &cancel,
         |mut result: DirectoryResult| {
             annotator.annotate(&mut result);
+            results.push(result.clone());
+            folder_links::apply(&mut result, &links, &inventory);
             on_result(&result);
-            results.push(result);
         },
         |path| on_progress(path),
     );
     if let Some(warning) = public_data_warning {
         summary.warnings.push(warning);
     }
+    summary.warnings.extend(update_warnings);
     summary.warnings.extend(references.warnings.iter().cloned());
     summary.warnings.extend(definitions.warnings.iter().map(|warning| format!("Definitions: {warning}")));
     let (saved_at_unix, save_error) = if summary.canceled {
@@ -161,13 +172,19 @@ pub fn post_uninstall(local_data_dir: &Path, cancel: &AtomicBool) -> Result<Post
         .collect();
     let started = std::time::Instant::now();
     let mut summary = ScanSummary { mode: "post_uninstall".into(), started_at_unix: storage::now_unix(), complete: true, ..Default::default() };
+    match public_data::update(local_data_dir) {
+        Ok(status) => summary.warnings.extend(status.warnings),
+        Err(error) => summary.warnings.push(format!("Folder database update: {error}; cached data was kept.")),
+    }
     let definitions = Definitions::load(&definitions_directory(local_data_dir));
     let knowledge = public_data::load(local_data_dir).map(|(knowledge, _)| knowledge).unwrap_or_default();
     let references = cleaner_core::references::collect(&inventory.applications);
     let annotator = Annotator::new(&inventory, Some(&latest), knowledge, &definitions, &references);
+    let links = folder_links::list(&database)?;
     let mut results = Vec::new();
     cleaner_core::scan_targets(targets, &inventory.applications, cancel, &mut summary, |mut result| {
         annotator.annotate(&mut result);
+        folder_links::apply(&mut result, &links, &inventory);
         results.push(result);
     }, |_| {});
     summary.canceled = cancel.load(std::sync::atomic::Ordering::Relaxed);

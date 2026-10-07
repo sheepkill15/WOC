@@ -471,7 +471,7 @@ fn ensure_no_links(path: &Path, allow_missing: bool) -> Result<(), String> {
 /// On Windows, keep directory handles open without FILE_SHARE_DELETE so a
 /// checked parent cannot be renamed/replaced by a junction during the operation.
 #[cfg(windows)]
-fn guard_parents(path: &Path) -> Result<Vec<fs::File>, String> {
+pub(crate) fn guard_parents(path: &Path) -> Result<Vec<fs::File>, String> {
     use std::os::windows::fs::OpenOptionsExt;
     let mut guards = Vec::new();
     for parent in path.ancestors().skip(1) {
@@ -489,7 +489,7 @@ fn guard_parents(path: &Path) -> Result<Vec<fs::File>, String> {
 }
 
 #[cfg(not(windows))]
-fn guard_parents(path: &Path) -> Result<Vec<fs::File>, String> {
+pub(crate) fn guard_parents(path: &Path) -> Result<Vec<fs::File>, String> {
     ensure_no_links(path.parent().unwrap_or(path), true)?;
     Ok(Vec::new())
 }

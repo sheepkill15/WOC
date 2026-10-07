@@ -101,7 +101,7 @@ pub fn update(directory: &Path) -> Result<PublicDataStatus, String> {
     };
     let cache_warning = std::mem::take(&mut status.warnings);
     let client = Client::builder()
-        .timeout(Duration::from_secs(40))
+        .timeout(Duration::from_secs(20))
         .user_agent("WindowsOrphanCleaner/0.1 (https://github.com; public folder index update)")
         .build()
         .map_err(|err| err.to_string())?;
