@@ -46,3 +46,27 @@ test('cleanup updates ancestor sizes and preserves failed moves', () => {
 test('duplicate package families create one application entry', () => {
   assert.equal(applicationCatalog([app, app], []).entries.length, 1);
 });
+
+test('shared associations appear under every current app without multiplying totals', () => {
+  const shared = folder('C:\\NVIDIA', 100, null, { ownership: 'shared', orphanStatus: 'associated_with_installed', associatedApplications: [app, other, app] });
+  const child = folder('C:\\NVIDIA\\Example', 30);
+  const nested = folder('C:\\NVIDIA\\Shared', 20, null, { ownership: 'shared', orphanStatus: 'associated_with_installed', associatedApplications: [app, other] });
+  const { entries, stray, sharedBytes } = applicationCatalog([app, other], [shared, child, nested]);
+  assert.deepEqual(entries.map(entry => entry.sharedFolders.length), [2, 2]);
+  assert.deepEqual(entries.map(entry => entry.bytes), [30, 0]);
+  assert.equal(sharedBytes, 70);
+  assert.equal(stray.length, 0);
+});
+
+test('stale shared associations cannot absorb unknown, former, missing-app or manually owned folders', () => {
+  const extra = { ownership: 'shared', orphanStatus: 'associated_with_installed', associatedApplications: [other] };
+  const missing = folder('C:\\Missing', 10, null, extra);
+  const former = folder('C:\\Former', 20, null, { ...extra, associatedApplications: [app], orphanStatus: 'possibly_orphaned' });
+  const unknown = folder('C:\\Unknown', 30, null, { ...extra, associatedApplications: [app], ownership: 'unknown' });
+  const manual = folder('C:\\Manual', 40, app, { ...extra, ownership: 'manual', orphanStatus: 'not_orphaned' });
+  const { entries, stray, sharedBytes } = applicationCatalog([app], [missing, former, unknown, manual]);
+  assert.equal(entries[0].sharedFolders.length, 0);
+  assert.equal(entries[0].bytes, 40);
+  assert.equal(sharedBytes, 0);
+  assert.equal(stray.length, 3);
+});

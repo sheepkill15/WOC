@@ -26,6 +26,7 @@ export type DirectoryResult = {
   path: string; root: string; parentPath?: string | null; sizeBytes: number; fileCount: number; directoryCount: number;
   newestModifiedUnix: number | null; oldestModifiedUnix?: number | null; createdUnix?: number | null; skippedEntries: number;
   owner: Application | null; ownerHint?: string | null; ownership: string; orphanStatus: string; evidence: Evidence[];
+  associatedApplications?: Application[];
   locationClass?: string | null; content?: ContentProfile; executables?: ExecutableInfo[]; assessment?: Assessment;
 };
 export type ScanSummary = {

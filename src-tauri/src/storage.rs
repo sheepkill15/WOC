@@ -218,6 +218,7 @@ fn load_scan(conn: &Connection, id: i64, captured_at: i64, inventory_json: Strin
     };
     let links = crate::folder_links::list_from(conn)?;
     for result in &mut scan.results {
+        cleaner_core::refresh_shared_associations(result, &scan.inventory.applications);
         crate::folder_links::apply(result, &links, &scan.inventory);
         cleaner_core::finalize(result);
     }
@@ -478,6 +479,32 @@ mod tests {
         save_settings(&database, &settings).unwrap();
         assert_eq!(load_settings(&database).unwrap().quarantine_retention_days, 7);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn old_shared_results_gain_associations_without_changing_ownership_or_measurements() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        initialize_db(&conn).unwrap();
+        let mut saved = scan(1);
+        let app = cleaner_core::Application { id: "nvidia-driver".into(), name: "NVIDIA Graphics Driver 617.14".into(), publisher: Some("NVIDIA Corporation".into()), ..Default::default() };
+        saved.inventory.applications.push(app);
+        let result = &mut saved.results[0];
+        result.path = r"C:\Users\Test\AppData\Local\NVIDIA".into();
+        result.ownership = "shared".into();
+        result.orphan_status = "associated_with_installed".into();
+        save_to_connection(&mut conn, &saved).unwrap();
+        // Simulate a snapshot written before this field existed.
+        conn.execute("UPDATE scan_results SET result_json = json_remove(result_json, '$.associatedApplications')", []).unwrap();
+        let loaded = load_from_connection(&conn).unwrap().unwrap();
+        let result = &loaded.results[0];
+        assert_eq!(result.associated_applications[0].id, "nvidia-driver");
+        assert!(result.owner.is_none());
+        assert_eq!(result.ownership, "shared");
+        assert_eq!(result.orphan_status, "associated_with_installed");
+        assert_eq!(result.size_bytes, 1);
+        assert!(result.evidence.is_empty());
+        let stored: String = conn.query_row("SELECT result_json FROM scan_results", [], |row| row.get(0)).unwrap();
+        assert!(!stored.contains("associatedApplications"));
     }
 
     #[test]

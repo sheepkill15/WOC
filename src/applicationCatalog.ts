@@ -16,12 +16,19 @@ export function folderBytes(folders: DirectoryResult[]): number {
 
 export function applicationCatalog(apps: Application[], results: DirectoryResult[]) {
   const unique = [...new Map(results.map(result => [pathKey(result.path), result])).values()];
-  const entries = [...new Map(apps.map(app => [app.id.toLowerCase(), app])).values()].map(application => ({ application, folders: [] as DirectoryResult[], bytes: 0 }));
+  const entries = [...new Map(apps.map(app => [app.id.toLowerCase(), app])).values()].map(application => ({ application, folders: [] as DirectoryResult[], sharedFolders: [] as DirectoryResult[], bytes: 0 }));
   const stray: DirectoryResult[] = [];
   for (const folder of unique) {
     const entry = folder.owner && !["probable_orphan", "possibly_orphaned"].includes(folder.orphanStatus) && folder.ownership !== "shared"
       ? entries.find(entry => sameApp(entry.application, folder.owner!)) : undefined;
-    if (entry) entry.folders.push(folder); else stray.push(folder);
+    if (entry) {
+      entry.folders.push(folder);
+    } else {
+      const associated = !folder.owner && folder.ownership === "shared" && folder.orphanStatus === "associated_with_installed"
+        ? entries.filter(entry => folder.associatedApplications?.some(app => sameApp(entry.application, app))) : [];
+      for (const entry of associated) entry.sharedFolders.push(folder);
+      if (!associated.length) stray.push(folder);
+    }
   }
   for (const entry of entries) {
     // A linked parent may contain independently detected folders of another owner.
@@ -30,8 +37,14 @@ export function applicationCatalog(apps: Application[], results: DirectoryResult
       return sum + Math.max(0, folder.sizeBytes - folderBytes(descendants));
     }, 0);
     entry.folders.sort((a, b) => b.sizeBytes - a.sizeBytes);
+    entry.sharedFolders.sort((a, b) => b.sizeBytes - a.sizeBytes);
   }
-  return { entries, stray };
+  const shared = unique.filter(folder => entries.some(entry => entry.sharedFolders.includes(folder)));
+  const sharedBytes = shared.reduce((sum, folder) => {
+    const descendants = unique.filter(child => pathKey(child.path) !== pathKey(folder.path) && within(child.path, folder.path));
+    return sum + Math.max(0, folder.sizeBytes - folderBytes(descendants));
+  }, 0);
+  return { entries, stray, sharedBytes };
 }
 
 export function formerOwnerText(folder: DirectoryResult): string | null {

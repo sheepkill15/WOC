@@ -189,4 +189,16 @@ mod tests {
         assert!(plan(&app, &[], &[]).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn shared_associations_do_not_authorize_uninstall_cleanup() {
+        let app = Application { id: "driver".into(), name: "NVIDIA Graphics Driver".into(), ..Default::default() };
+        let result = DirectoryResult {
+            path: r"C:\Users\Test\AppData\Local\NVIDIA".into(),
+            ownership: "shared".into(), orphan_status: "associated_with_installed".into(),
+            associated_applications: vec![app.clone()], ..Default::default()
+        };
+        let (included, _) = folders(&app, &[result]);
+        assert!(included.is_empty());
+    }
 }

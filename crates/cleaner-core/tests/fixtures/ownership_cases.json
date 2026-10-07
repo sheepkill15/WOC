@@ -1,5 +1,35 @@
 [
   {
+    "id": "local-nvidia-shared-associations",
+    "rationale": "The short NVIDIA data folder must retain all installed vendor associations instead of disappearing from the application catalog. The parent remains shared even with an unrelated product present.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\NVIDIA",
+    "root": "Local",
+    "applications": [
+      { "id": "nvidia-app", "name": "NVIDIA App 11.0.9.251", "publisher": "NVIDIA Corporation" },
+      { "id": "nvidia-sdk", "name": "NVIDIA FrameView SDK 1.9", "publisher": "NVIDIA Corporation" },
+      { "id": "nvidia-driver", "name": "NVIDIA Graphics Driver 617.14", "publisher": "NVIDIA Corporation" },
+      { "id": "nvidia-audio", "name": "NVIDIA HD Audio Driver 1.4", "publisher": "NVIDIA Corporation" },
+      { "id": "other", "name": "Other App", "publisher": "Other Corporation" }
+    ],
+    "expected": {
+      "ownerHint": "NVIDIA Corporation",
+      "ownership": "shared",
+      "orphanStatus": "associated_with_installed",
+      "evidenceKinds": ["vendor_or_install_segment"],
+      "associatedApplicationIds": ["nvidia-app", "nvidia-sdk", "nvidia-driver", "nvidia-audio"]
+    }
+  },
+  {
+    "id": "local-nvidia-without-inventory",
+    "rationale": "A vendor name alone cannot assert current installation or an application relationship.",
+    "path": "C:\\Users\\Test\\AppData\\Local\\NVIDIA",
+    "root": "Local",
+    "expected": {
+      "ownership": "unknown", "orphanStatus": "unknown", "evidenceKinds": [],
+      "associatedApplicationIds": []
+    }
+  },
+  {
     "id": "installed-exact-name",
     "rationale": "An exact normalized directory name is useful ownership evidence, but not proof of an installation path.",
     "path": "C:\\Users\\Test\\AppData\\Roaming\\Notion",
@@ -103,7 +133,8 @@
       "ownerHint": "NVIDIA Corporation",
       "ownership": "shared",
       "orphanStatus": "associated_with_installed",
-      "evidenceKinds": ["vendor_or_install_segment"]
+      "evidenceKinds": ["vendor_or_install_segment"],
+      "associatedApplicationIds": ["nvidia-driver", "nvidia-app"]
     }
   },
   {
@@ -122,7 +153,8 @@
       "ownerHint": "BraveSoftware",
       "ownership": "shared",
       "orphanStatus": "associated_with_installed",
-      "evidenceKinds": ["vendor_or_install_segment"]
+      "evidenceKinds": ["vendor_or_install_segment"],
+      "associatedApplicationIds": ["brave"]
     }
   },
   {
@@ -138,7 +170,8 @@
       "ownerHint": "Teamfight Tactics",
       "ownership": "shared",
       "orphanStatus": "associated_with_installed",
-      "evidenceKinds": ["multiple_matches", "known_product_alias"]
+      "evidenceKinds": ["multiple_matches", "known_product_alias"],
+      "associatedApplicationIds": ["tft-live", "tft-pbe"]
     }
   },
   {

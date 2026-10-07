@@ -37,6 +37,7 @@ pub fn apply(result: &mut DirectoryResult, links: &[FolderLink], inventory: &Inv
     let Some(link) = links.iter().find(|link| link.path.eq_ignore_ascii_case(&result.path)) else { return; };
     let installed = inventory.applications.iter().find(|app| cleaner_core::same_application(app, &link.application));
     result.owner = Some(installed.unwrap_or(&link.application).clone());
+    result.associated_applications.clear();
     result.owner_hint = Some(link.application.name.clone());
     result.ownership = "manual".into();
     result.orphan_status = if installed.is_some() { "not_orphaned" } else if inventory.warnings.is_empty() { "probable_orphan" } else { "unknown" }.into();
@@ -55,9 +56,10 @@ mod tests {
     fn exact_links_survive_removal_without_changing_content_protection() {
         let app = Application { id: "app".into(), name: "Example".into(), ..Default::default() };
         let links = [FolderLink { path: r"C:\Data\Example".into(), application: app.clone() }];
-        let mut result = DirectoryResult { path: r"c:\data\example".into(), location_class: Some("user_data".into()), ..Default::default() };
+        let mut result = DirectoryResult { path: r"c:\data\example".into(), associated_applications: vec![app.clone()], location_class: Some("user_data".into()), ..Default::default() };
         apply(&mut result, &links, &Inventory { applications: vec![app], ..Default::default() });
         assert_eq!(result.orphan_status, "not_orphaned");
+        assert!(result.associated_applications.is_empty());
         apply(&mut result, &links, &Inventory::default());
         assert_eq!(result.orphan_status, "probable_orphan");
         assert_eq!(result.location_class.as_deref(), Some("user_data"));

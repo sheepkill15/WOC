@@ -65,6 +65,12 @@ export function DirectoryDetails({ result, onClose }: { result: DirectoryResult;
       <div><span>Last change</span><strong title={formatDate(result.newestModifiedUnix)}>{formatAge(result.newestModifiedUnix)}</strong></div>
     </div>
 
+    {!result.owner && result.ownership === "shared" && result.orphanStatus === "associated_with_installed" && (result.associatedApplications?.length ?? 0) > 0 && <div className="details-block">
+      <h4>Associated applications</h4>
+      <ul>{result.associatedApplications!.map(app => <li key={app.id}>{app.name}</li>)}</ul>
+      <p className="muted small">This is a shared relationship. No single application owns the whole folder.</p>
+    </div>}
+
     {assessment && assessment.reasons.length > 0 && <div className="details-block">
       <h4>Why</h4>
       <ReasonList reasons={assessment.reasons} />

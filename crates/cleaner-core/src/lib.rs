@@ -82,6 +82,9 @@ pub struct DirectoryResult {
     pub owner: Option<Application>,
     #[serde(default)]
     pub owner_hint: Option<String>,
+    /// Installed associations for shared data; never exclusive ownership.
+    #[serde(default)]
+    pub associated_applications: Vec<Application>,
     pub ownership: String,
     pub orphan_status: String,
     pub evidence: Vec<Evidence>,
@@ -878,7 +881,12 @@ fn inspect_directory_inner(path: &Path, cancel: &AtomicBool, loose_only: bool) -
     stats
 }
 
+#[cfg(test)]
 fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, String, String, Vec<Evidence>) {
+    resolve_owner_with_associations(path, apps, &mut Vec::new())
+}
+
+fn resolve_owner_with_associations(path: &Path, apps: &[Application], associated: &mut Vec<Application>) -> (Option<Application>, String, String, Vec<Evidence>) {
     let basename = path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default();
     let normalized = normalize_name(&basename);
     if normalized.is_empty() {
@@ -945,6 +953,11 @@ fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, Str
         }
     }
     if strong.len() > 1 || (strong.is_empty() && names.len() > 1) {
+        associated.extend(if strong.is_empty() {
+            names.iter().map(|(app, _)| (*app).clone()).collect::<Vec<_>>()
+        } else {
+            strong.iter().map(|(app, _, _, _)| (*app).clone()).collect()
+        });
         let matching = if strong.is_empty() { names.iter().map(|(app, _)| app.name.as_str()).collect::<Vec<_>>() }
             else { strong.iter().map(|(app, _, _, _)| app.name.as_str()).collect::<Vec<_>>() };
         let evidence = vec![Evidence { kind: "multiple_matches".into(), description: format!("Several installed applications match this directory ({}); no single product owner can be assigned.", matching.join(", ")), strength: "medium".into() }];
@@ -983,6 +996,7 @@ fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, Str
             }]);
         }
         if !reverse_domain_vendors.is_empty() {
+            associated.extend(reverse_domain_vendors.iter().map(|app| (*app).clone()));
             let examples = reverse_domain_vendors.iter().take(3)
                 .map(|app| app.name.as_str()).collect::<Vec<_>>().join(", ");
             return (None, "shared".into(), "associated_with_installed".into(), vec![Evidence {
@@ -995,6 +1009,7 @@ fn resolve_owner(path: &Path, apps: &[Application]) -> (Option<Application>, Str
             return (None, "unknown".into(), "unknown".into(), vec![]);
         }
         let examples = vendors.iter().take(3).map(|app| app.name.as_str()).collect::<Vec<_>>().join(", ");
+        associated.extend(vendors.iter().map(|app| (*app).clone()));
         return (None, "shared".into(), "associated_with_installed".into(), vec![Evidence {
             kind: "vendor_or_install_segment".into(),
             description: format!("This folder name matches an installed application's publisher or an installation-path component (for example: {examples}). It may also contain data from other or older products."),
@@ -1099,14 +1114,16 @@ fn enrich_directory(result: &mut DirectoryResult, apps: &[Application]) {
 /// entry point for the live scanner and the fixture-based ownership corpus.
 /// Size and timestamp fields remain empty until the scanner measures them.
 pub fn classify_directory(path: &Path, root: &str, apps: &[Application]) -> DirectoryResult {
-    let (owner, ownership, orphan_status, evidence) = resolve_owner(path, apps);
+    let mut associated_applications = Vec::new();
+    let (owner, ownership, orphan_status, evidence) = resolve_owner_with_associations(path, apps, &mut associated_applications);
     let mut result = DirectoryResult {
         path: path.to_string_lossy().into_owned(), root: root.to_owned(), parent_path: None, size_bytes: 0,
         file_count: 0, directory_count: 0, newest_modified_unix: None,
-        skipped_entries: 0, owner, owner_hint: None, ownership, orphan_status, evidence,
+        skipped_entries: 0, owner, owner_hint: None, associated_applications, ownership, orphan_status, evidence,
         ..Default::default()
     };
     enrich_directory(&mut result, apps);
+    if result.ownership != "shared" { result.associated_applications.clear(); }
     if is_personal_scan_target(root, path) {
         result.location_class = Some("user_data".into());
         result.orphan_status = "user_files".into();
@@ -1117,6 +1134,15 @@ pub fn classify_directory(path: &Path, root: &str, apps: &[Application]) -> Dire
         });
     }
     result
+}
+
+/// Backfill shared relationships in old snapshots using their own inventory.
+/// Ownership, history and measurements remain as recorded by the scan.
+pub fn refresh_shared_associations(result: &mut DirectoryResult, apps: &[Application]) {
+    result.associated_applications.clear();
+    if result.owner.is_some() || result.ownership != "shared" || result.orphan_status != "associated_with_installed" { return; }
+    let (_, ownership, status, _) = resolve_owner_with_associations(Path::new(&result.path), apps, &mut result.associated_applications);
+    if ownership != "shared" || status != "associated_with_installed" { result.associated_applications.clear(); }
 }
 
 fn is_personal_scan_target(root: &str, path: &Path) -> bool {

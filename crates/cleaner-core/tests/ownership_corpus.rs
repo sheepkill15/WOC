@@ -39,6 +39,8 @@ struct ExpectedClassification {
     ownership: String,
     orphan_status: String,
     evidence_kinds: Vec<String>,
+    #[serde(default)]
+    associated_application_ids: Option<Vec<String>>,
 }
 
 impl From<CorpusApplication> for Application {
@@ -113,5 +115,9 @@ fn ownership_corpus_matches_reviewed_expectations() {
             "{}: evidence; {}",
             case.id, case.rationale
         );
+        if let Some(expected) = case.expected.associated_application_ids {
+            assert_eq!(result.associated_applications.iter().map(|app| app.id.clone()).collect::<Vec<_>>(), expected,
+                "{}: shared associations; {}", case.id, case.rationale);
+        }
     }
 }
